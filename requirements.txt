@@ -42,4 +42,4 @@ uvicorn
 uvloop
 webvtt-py
 xattr
-yt-dlp[default,curl-cffi]==2026.6.9
+yt-dlp[default,curl-cffi]==2026.7.4
