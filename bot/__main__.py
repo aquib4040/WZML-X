@@ -3,6 +3,8 @@
 import faulthandler
 from sys import stderr
 from logging import FileHandler, getLogger
+from re import search
+from time import monotonic
 
 faulthandler.enable(file=stderr, all_threads=True)
 
@@ -112,13 +114,34 @@ async def main():
 bot_loop.run_until_complete(main())
 
 
+_schema_warning_last = 0.0
+_schema_warning_suppressed = 0
+
+
 def _handle_asyncio_exception(loop, context):
+    global _schema_warning_last, _schema_warning_suppressed
     exc = context.get("exception")
     if exc and isinstance(exc, (KeyError, ValueError)):
         msg = str(exc)
         msg_lower = msg.lower()
         if "unknown constructor" in msg_lower or "server sent an unknown" in msg_lower:
-            LOGGER.warning(f"Pyrogram schema mismatch (tg side): {msg}")
+            now = monotonic()
+            if now - _schema_warning_last >= 300:
+                constructor = search(r"constructor:\s*(0x[0-9a-f]+)", msg_lower)
+                constructor = constructor.group(1) if constructor else "unknown"
+                suffix = (
+                    f"; {_schema_warning_suppressed} similar updates suppressed"
+                    if _schema_warning_suppressed
+                    else ""
+                )
+                LOGGER.warning(
+                    "Telegram sent an update unsupported by the current "
+                    f"Pyrogram schema ({constructor}); update skipped{suffix}"
+                )
+                _schema_warning_last = now
+                _schema_warning_suppressed = 0
+            else:
+                _schema_warning_suppressed += 1
             return
     loop.default_exception_handler(context)
 

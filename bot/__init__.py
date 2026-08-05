@@ -16,11 +16,11 @@ from logging import (
     ERROR,
     INFO,
     WARNING,
-    FileHandler,
     StreamHandler,
     basicConfig,
     getLogger,
 )
+from logging.handlers import RotatingFileHandler
 from os import cpu_count
 from time import time
 
@@ -43,7 +43,15 @@ bot_start_time = time()
 basicConfig(
     format="[%(asctime)s] [%(levelname)s] - %(message)s",  #  [%(filename)s:%(lineno)d]
     datefmt="%d-%b-%y %I:%M:%S %p",
-    handlers=[FileHandler("log.txt"), StreamHandler()],
+    handlers=[
+        RotatingFileHandler(
+            "log.txt",
+            maxBytes=10 * 1024 * 1024,
+            backupCount=2,
+            encoding="utf-8",
+        ),
+        StreamHandler(),
+    ],
     level=INFO,
 )
 

@@ -28,6 +28,19 @@ from .status_utils import get_readable_file_size, get_readable_time, time_to_sec
 
 _metadata_cache = {}
 
+
+def _bounded_stderr(stderr, limit=1800):
+    if not stderr:
+        return "no stderr output"
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    stderr = str(stderr).strip()
+    if len(stderr) <= limit:
+        return stderr
+    head = stderr[:600].rstrip()
+    tail = stderr[-1000:].lstrip()
+    return f"{head}\n... {len(stderr) - 1600} characters omitted ...\n{tail}"
+
 UPLOADER_TAGS = (
     "Toonworld4all",
     "SubsPlease",
@@ -384,7 +397,8 @@ async def get_audio_thumbnail(audio_file):
             _, err, code = await wait_for(cmd_exec(cmd), timeout=60)
         if code != 0 or not await aiopath.exists(output):
             LOGGER.error(
-                f"Error while extracting thumbnail from audio. Name: {audio_file} stderr: {err}"
+                "Error while extracting thumbnail from audio. "
+                f"Name: {audio_file} stderr: {_bounded_stderr(err)}"
             )
             return None
     except Exception:
@@ -412,6 +426,7 @@ async def get_video_thumbnail(video_file, duration):
         "-hide_banner",
         "-loglevel",
         "error",
+        "-xerror",
         "-ss",
         f"{duration}",
         "-i",
@@ -431,7 +446,8 @@ async def get_video_thumbnail(video_file, duration):
             _, err, code = await wait_for(cmd_exec(cmd), timeout=60)
         if code != 0 or not await aiopath.exists(output):
             LOGGER.error(
-                f"Error while extracting thumbnail from video. Name: {video_file} stderr: {err}"
+                "Error while extracting thumbnail from video. "
+                f"Name: {video_file} stderr: {_bounded_stderr(err)}"
             )
             return None
         def _optimize_thumb(path):
@@ -519,7 +535,8 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots):
             _, err, code = await wait_for(cmd_exec(cmd), timeout=60)
         if code != 0 or not await aiopath.exists(output):
             LOGGER.error(
-                f"Error while combining thumbnails for video. Name: {video_file} stderr: {err}"
+                "Error while combining thumbnails for video. "
+                f"Name: {video_file} stderr: {_bounded_stderr(err)}"
             )
             return None
     except Exception:
