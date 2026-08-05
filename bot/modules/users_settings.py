@@ -702,6 +702,11 @@ Unlock to view, add, test, remove, or export helper token data."""
         font_label = {"": "Normal", "b": "Bold", "i": "Italic"}.get(font_value, font_value)
         ltype = "DOCUMENT" if enabled("AS_DOCUMENT") else "MEDIA"
         auto_thumb = "Enabled" if enabled("AUTO_THUMBNAIL") else "Disabled"
+        thumbnail_mode = str(
+            user_dict.get("THUMBNAIL_MODE", Config.THUMBNAIL_MODE) or "automatic"
+        ).lower()
+        if thumbnail_mode not in {"automatic", "manual"}:
+            thumbnail_mode = "automatic"
         autorename_status = "Enabled" if enabled("AUTORENAME") else "Disabled"
         complete_msg = "Enabled" if enabled("LEECH_COMPLETE_MSG") else "Disabled"
         sequential_leech = "Enabled" if enabled("SEQUENTIAL_LEECH") else "Disabled"
@@ -742,6 +747,10 @@ Unlock to view, add, test, remove, or export helper token data."""
             state_label("Auto Thumbnail", enabled("AUTO_THUMBNAIL")),
             f"userset {user_id} tog AUTO_THUMBNAIL {'f' if enabled('AUTO_THUMBNAIL') else 't'}",
             style=state_style(enabled("AUTO_THUMBNAIL")),
+        )
+        buttons.data_button(
+            f"Thumbnail Mode ({thumbnail_mode.title()})",
+            f"userset {user_id} thumbmode {'manual' if thumbnail_mode == 'automatic' else 'automatic'}",
         )
         buttons.data_button(
             state_label("AutoRename", enabled("AUTORENAME")),
@@ -785,6 +794,7 @@ Complete Msg: <b>{complete_msg}</b>
 Sequential Leech: <b>{sequential_leech}</b>
 Thumbnail Layout: <b>{thumb_layout}</b>
 Auto Thumbnail: <b>{auto_thumb}</b>
+Thumbnail Mode: <b>{thumbnail_mode.title()}</b>
 AutoRename: <b>{autorename_status}</b>
 AutoRename Template: <code>{escape(lremname_auto)}</code>
 Subtitle Target: <code>{escape(subtitle_target)}</code>
@@ -1962,7 +1972,9 @@ async def add_helper_token(_, message, rfunc):
         await send_message(
             message,
             f"Helper token saved: @{escape(str(info.get('username')))}\n"
-            "Add/keep this helper bot inside LEECH_DUMP_CHAT.",
+            "@admin add this user "
+            f"@{escape(str(info.get('username')))} in dump.\n"
+            "Until then, uploads fall back to the user's PM when possible.",
         )
     except Exception as e:
         await delete_message(message)
@@ -2024,6 +2036,15 @@ async def get_menu(option, message, user_id):
     )
     if option == "lremname_auto":
         buttons.data_button("Create", f"userset {user_id} arcreate {option}", "header")
+        clean_enabled = user_dict.get(
+            "AUTORENAME_CLEAN_SEPARATORS",
+            getattr(Config, "AUTORENAME_CLEAN_SEPARATORS", False),
+        )
+        buttons.data_button(
+            f"{'🟢' if clean_enabled else '🔴'} Remove . _ -",
+            f"userset {user_id} tog AUTORENAME_CLEAN_SEPARATORS {'f' if clean_enabled else 't'}",
+            "header",
+        )
     if user_dict.get(option, False):
         if option == "THUMBNAIL":
             buttons.data_button(
@@ -2293,6 +2314,12 @@ async def edit_user_settings(client, query):
         update_user_ldata(user_id, "LEECH_FONT", next_value)
         await database.update_user_data(user_id)
         await update_user_settings(query, "leech")
+    elif data[2] == "thumbmode":
+        await query.answer("Thumbnail mode updated.", show_alert=True)
+        mode = data[3] if len(data) > 3 and data[3] in {"automatic", "manual"} else "automatic"
+        update_user_ldata(user_id, "THUMBNAIL_MODE", mode)
+        await database.update_user_data(user_id)
+        await update_user_settings(query, "leech")
     elif data[2] in [
         "general",
         "mirror",
@@ -2485,6 +2512,8 @@ async def edit_user_settings(client, query):
             back_to = "general"
         elif data[3] in ["AUTO_POSTER_ENABLED", "AUTO_POSTER_USE_AS_THUMBNAIL"]:
             back_to = "post"
+        elif data[3] == "AUTORENAME_CLEAN_SEPARATORS":
+            back_to = "leech"
         elif data[3].startswith("AUTO_") and data[3] != "AUTO_THUMBNAIL":
             back_to = "autoprocess"
         else:

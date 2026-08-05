@@ -768,9 +768,19 @@ class StarFallXUploadManager:
         if not await self._destination_accessible(
             client, route_chat_id, f"StarFallX helper @{username}"
         ):
-            record["status"] = "Destination unavailable"
-            record["last_error"] = f"Cannot access {route_chat_id}"
-            return None
+            pm_chat = getattr(listener, "user_id", None) if listener is not None else None
+            if direct_final and pm_chat and await self._destination_accessible(
+                client, pm_chat, f"StarFallX helper @{username} PM fallback"
+            ):
+                route_chat_id, route_thread_id = pm_chat, None
+                notice = (
+                    f"StarFallX: @{username} cannot access the dump/final chat, "
+                    "so this upload is being delivered to your PM."
+                )
+            else:
+                record["status"] = "Destination unavailable"
+                record["last_error"] = f"Cannot access {route_chat_id}"
+                return None
         record.update(
             {
                 "bot_id": meta.get("bot_id") or record.get("bot_id"),

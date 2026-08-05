@@ -36,6 +36,7 @@ from .restart import (
 )
 from .imdb import imdb_search, imdb_callback
 from .poster_search import poster_search, poster_select
+from .file_link import file_link
 from .sites import sites
 from .rss import get_rss_menu, rss_listener
 from .tamilmv import tamilmv
@@ -104,6 +105,7 @@ __all__ = [
     "imdb_callback",
     "poster_search",
     "poster_select",
+    "file_link",
     "sites",
     "get_rss_menu",
     "rss_listener",

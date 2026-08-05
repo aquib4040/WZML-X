@@ -2441,6 +2441,7 @@ async def apply_template_rename(filename, template, filepath=None, **extra):
     """
     if not template or "{" not in template:
         return filename
+
     supplied_metadata = extra.pop("template_metadata", None)
     source_filename = str(extra.get("source_filename") or filename or "")
     merge_metadata = (
@@ -2497,6 +2498,26 @@ async def apply_template_rename(filename, template, filepath=None, **extra):
         return renamed
     except (KeyError, ValueError, IndexError):
         return filename
+
+
+def clean_autorename_separators(filename):
+    """Clean release-name separators without damaging decimals/extensions."""
+    path = Path(filename)
+    extension = path.suffix
+    stem = path.stem
+    decimals = {}
+
+    def protect(match):
+        key = f"DECIMALMARK{len(decimals)}"
+        decimals[key] = match.group(0)
+        return key
+
+    stem = re.sub(r"(?<=\d)\.(?=\d)", protect, stem)
+    stem = re.sub(r"[._-]+", " ", stem)
+    for key, value in decimals.items():
+        stem = stem.replace(key, value)
+    stem = re.sub(r"\s+", " ", stem).strip()
+    return f"{stem}{extension}" if stem else filename
 
 
 def apply_regex_rename(filename, pattern_str):

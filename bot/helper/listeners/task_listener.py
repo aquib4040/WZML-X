@@ -783,6 +783,7 @@ class TaskListener(TaskConfig):
                 rss_non_queued_up.remove(self.mid)
 
         await start_from_queued()
+        self.mark_multi_step_done()
         self._mark_bq_done("complete")
 
     async def on_download_error(self, error, button=None, is_limit=False):
@@ -853,6 +854,7 @@ class TaskListener(TaskConfig):
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
         self._mark_bq_done(f"download_error: {error}")
+        self.mark_multi_step_done()
 
     async def on_upload_error(self, error):
         async with task_dict_lock:
@@ -903,3 +905,4 @@ class TaskListener(TaskConfig):
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
         self._mark_bq_done(f"upload_error: {error}")
+        self.mark_multi_step_done()

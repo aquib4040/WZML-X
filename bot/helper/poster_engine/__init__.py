@@ -4,6 +4,7 @@ from .engine import (
     generate_task_poster,
     is_auto_poster_enabled,
     render_poster_option,
+    save_poster_artwork,
     search_poster_metadata,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "generate_task_poster",
     "is_auto_poster_enabled",
     "render_poster_option",
+    "save_poster_artwork",
     "search_poster_metadata",
 ]

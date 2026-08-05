@@ -338,6 +338,11 @@ THUMBNAIL_LAYOUT = ""
 # Auto Rename and Thumbnail
 AUTO_THUMBNAIL = False
 AUTO_THUMBNAIL_QUALITY = 95
+# automatic: provider lookup; manual: thumbnails/<user>_landscape.jpg and _poster.jpg
+THUMBNAIL_MODE = "automatic"
+# Replace dots, underscores and hyphens in AutoRename output while preserving
+# decimal audio values such as 2.0/5.1 and the final file extension.
+AUTORENAME_CLEAN_SEPARATORS = False
 TMDB_ACCESS_TOKEN = ""
 AUTORENAME = True
 RENAME_METHOD = "auto"

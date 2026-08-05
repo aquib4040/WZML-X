@@ -1,10 +1,12 @@
 from html import escape
 
 from .. import LOGGER, user_data
-from ..helper.ext_utils.bot_utils import new_task
+from ..helper.ext_utils.bot_utils import new_task, update_user_ldata
+from ..helper.ext_utils.db_handler import database
 from ..helper.poster_engine import (
     POSTER_TEMPLATE_COUNT,
     render_poster_option,
+    save_poster_artwork,
     search_poster_metadata,
 )
 from ..helper.telegram_helper.button_build import ButtonMaker
@@ -46,7 +48,7 @@ def _summary(metadata):
     if metadata.get("provider"):
         lines.append(f"<b>Provider:</b> {escape(str(metadata.get('provider')))}")
     lines.append("")
-    lines.append("Choose a poster template to save as your thumbnail.")
+    lines.append("Choose a style, or save the source artwork for Manual thumbnail mode.")
     return "\n".join(lines)
 
 
@@ -67,6 +69,8 @@ async def poster_search(_, message):
         buttons = ButtonMaker()
         for i in range(1, POSTER_TEMPLATE_COUNT + 1):
             buttons.data_button(f"Style {i}", f"psel {message.from_user.id} {wait.id} {i}")
+        buttons.data_button("Landscape", f"psel {message.from_user.id} {wait.id} artland")
+        buttons.data_button("Poster", f"psel {message.from_user.id} {wait.id} artpost")
         buttons.data_button("Close", f"psel {message.from_user.id} {wait.id} close", "footer")
         preview = await render_poster_option(metadata, message.from_user.id, user_dict, "1")
         await delete_message(wait)
@@ -96,6 +100,17 @@ async def poster_select(_, query):
         return
     user_dict = user_data.get(user_id, {})
     try:
+        if action in {"artland", "artpost"}:
+            kind = "poster" if action == "artpost" else "landscape"
+            path = await save_poster_artwork(metadata, user_id, kind)
+            update_user_ldata(user_id, "THUMBNAIL_MODE", "manual")
+            await database.update_user_data(user_id)
+            await query.answer(f"Saved {kind} artwork", show_alert=True)
+            await edit_message(
+                query.message,
+                f"<b>Manual {escape(kind)} artwork saved.</b>\n<code>{escape(path)}</code>",
+            )
+            return
         path = await render_poster_option(metadata, user_id, user_dict, action, save_thumbnail=True)
         await query.answer(f"Saved style {action}", show_alert=True)
         await edit_message(

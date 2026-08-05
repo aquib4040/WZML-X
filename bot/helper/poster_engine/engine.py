@@ -448,7 +448,12 @@ async def _download_image(url):
         return None
     url = str(url).strip()
     if not url.startswith(("http://", "https://")):
-        LOGGER.warning(f"Poster image URL is not HTTP(S); ignoring: {url[:80]}")
+        if await aiopath.exists(url):
+            try:
+                image = await sync_to_async(Image.open, url)
+                return image.convert("RGB")
+            except Exception as err:
+                LOGGER.warning(f"Poster image file could not be opened: {err}")
         return None
     try:
         async with AsyncClient(timeout=15, follow_redirects=True) as client:
@@ -1183,6 +1188,26 @@ async def render_poster_option(metadata, user_id, user_dict=None, option="1", sa
     return path
 
 
+async def save_poster_artwork(metadata, user_id, kind):
+    """Save provider artwork independently for manual thumbnail/poster mode."""
+    kind = "poster" if kind == "poster" else "landscape"
+    source = (
+        metadata.get("portrait_url") or metadata.get("poster_url")
+        if kind == "poster"
+        else metadata.get("landscape_url")
+    )
+    image = await _download_image(source)
+    if image is None:
+        alternate = metadata.get("landscape_url") or metadata.get("portrait_url")
+        image = await _download_image(alternate)
+    if image is None:
+        raise ValueError(f"No {kind} artwork is available for this result.")
+    await makedirs("thumbnails", exist_ok=True)
+    path = ospath.join("thumbnails", f"{user_id}_{kind}.jpg")
+    await sync_to_async(image.save, path, "JPEG", quality=95, optimize=True)
+    return path
+
+
 def _caption_template(user_dict, category):
     key = {
         "anime": "POST_ANIME_CAPTION",
@@ -1232,6 +1257,18 @@ async def generate_task_poster(
         custom_name,
         merge_source_name,
     )
+    if str(_cfg(user_dict, "THUMBNAIL_MODE", "automatic")).lower() == "manual":
+        landscape = ospath.join("thumbnails", f"{user_id}_landscape.jpg")
+        portrait = ospath.join("thumbnails", f"{user_id}_poster.jpg")
+        custom = ospath.join("thumbnails", f"{user_id}.jpg")
+        if await aiopath.exists(landscape) or await aiopath.exists(portrait):
+            metadata["landscape_url"] = landscape if await aiopath.exists(landscape) else portrait
+            metadata["portrait_url"] = portrait if await aiopath.exists(portrait) else landscape
+            metadata["poster_url"] = metadata["portrait_url"]
+        elif await aiopath.exists(custom):
+            metadata["landscape_url"] = custom
+            metadata["portrait_url"] = custom
+            metadata["poster_url"] = custom
     template = str(_cfg(user_dict, "POST_TEMPLATE_ID", 1) or 1)
     if template not in {str(i) for i in range(1, POSTER_TEMPLATE_COUNT + 1)}:
         template = "1"

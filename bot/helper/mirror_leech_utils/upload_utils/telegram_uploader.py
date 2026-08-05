@@ -53,6 +53,7 @@ from ...ext_utils.media_utils import (
     apply_template_rename,
     build_caption_metadata,
     choose_media_title_seed,
+    clean_autorename_separators,
     clean_rss_filename,
     download_image_thumb,
     get_anime_landscape_thumbnail,
@@ -311,6 +312,13 @@ class TelegramUploader:
                             template_metadata=template_data,
                         )
                         cap_file_ = file_
+                        clean_separators = self._listener.user_dict.get(
+                            "AUTORENAME_CLEAN_SEPARATORS",
+                            getattr(Config, "AUTORENAME_CLEAN_SEPARATORS", False),
+                        )
+                        if clean_separators:
+                            file_ = clean_autorename_separators(file_)
+                            cap_file_ = file_
                 elif rename_method == "regex":
                     pattern = (
                         self._listener.user_dict.get("lremname_regex")
@@ -859,6 +867,29 @@ class TelegramUploader:
                     LOGGER.info(f"Auto-thumbnail enabled for: {file}")
                     try:
                         as_doc = self._listener.as_doc
+                        thumbnail_mode = str(
+                            self._listener.user_dict.get(
+                                "THUMBNAIL_MODE", Config.THUMBNAIL_MODE
+                            )
+                            or "automatic"
+                        ).lower()
+                        if thumbnail_mode == "manual":
+                            landscape = f"thumbnails/{self._listener.user_id}_landscape.jpg"
+                            portrait = f"thumbnails/{self._listener.user_id}_poster.jpg"
+                            preferred = portrait if as_doc else landscape
+                            fallback = landscape if as_doc else portrait
+                            if await aiopath.exists(preferred):
+                                thumb = preferred
+                            elif await aiopath.exists(fallback):
+                                thumb = fallback
+                            elif await aiopath.exists(
+                                f"thumbnails/{self._listener.user_id}.jpg"
+                            ):
+                                thumb = f"thumbnails/{self._listener.user_id}.jpg"
+                            if thumb:
+                                LOGGER.info(f"Using manual thumbnail: {thumb}")
+                        if thumb:
+                            raise StopAsyncIteration
                         custom_name = getattr(self._listener, "custom_name", "")
                         thumb_lookup_name = choose_media_title_seed(
                             file,
@@ -906,6 +937,8 @@ class TelegramUploader:
                             LOGGER.info(f"Auto-thumbnail selected: {thumb}")
                         else:
                             LOGGER.info(f"Auto-thumbnail provider lookup found no image for: {file}")
+                    except StopAsyncIteration:
+                        pass
                     except Exception as e:
                         LOGGER.warning(f"Auto-thumbnail failed: {e}")
                 else:

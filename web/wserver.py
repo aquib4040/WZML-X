@@ -12,11 +12,6 @@ from asyncio import new_event_loop, set_event_loop
 bot_loop = new_event_loop()
 set_event_loop(bot_loop)
 
-from asyncio import new_event_loop, set_event_loop
-
-bot_loop = new_event_loop()
-set_event_loop(bot_loop)
-
 from asyncio import sleep
 from importlib import import_module
 from os import environ
@@ -29,7 +24,10 @@ from aioaria2 import Aria2HttpClient
 from aiohttp.client_exceptions import ClientError
 from aioqbt.client import create_client
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from pyrogram import Client
+from time import time
+from file_stream_utils import decode_file_token
 from fastapi.templating import Jinja2Templates
 from sabnzbdapi import SabnzbdClient
 from aioqbt.exc import AQError
@@ -80,7 +78,9 @@ def _load_config():
     access_pwd = environ.get("WEB_ACCESS_PASSWORD", "") or (
         getattr(cfg, "WEB_ACCESS_PASSWORD", "") if cfg else ""
     )
-    return bot_token, access_pwd
+    api_id = int(environ.get("TELEGRAM_API", 0) or (getattr(cfg, "TELEGRAM_API", 0) if cfg else 0))
+    api_hash = environ.get("TELEGRAM_HASH", "") or (getattr(cfg, "TELEGRAM_HASH", "") if cfg else "")
+    return bot_token, access_pwd, api_id, api_hash
 
 
 def _resolve_bot_id(token):
@@ -92,8 +92,9 @@ def _resolve_bot_id(token):
     return (token.split(":", 1)[0] or "0").strip()
 
 
-_BOT_TOKEN, _ACCESS_PASSWORD = _load_config()
+_BOT_TOKEN, _ACCESS_PASSWORD, _API_ID, _API_HASH = _load_config()
 _BOT_ID = _resolve_bot_id(_BOT_TOKEN)
+_stream_client = None
 
 
 def _service_pwd(service):
@@ -190,18 +191,71 @@ SERVICES = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global aria2, qbittorrent
+    global aria2, qbittorrent, _stream_client
     aria2 = Aria2HttpClient("http://localhost:6800/jsonrpc")
     qbittorrent = await create_client("http://localhost:8090/api/v2/")
-    yield
-    await aria2.close()
-    await qbittorrent.close()
+    try:
+        yield
+    finally:
+        if _stream_client is not None:
+            await _stream_client.stop()
+            _stream_client = None
+        await aria2.close()
+        await qbittorrent.close()
 
 
 app = FastAPI(lifespan=lifespan)
 
 
 templates = Jinja2Templates(directory="web/templates/")
+
+
+async def _get_stream_client():
+    global _stream_client
+    if _stream_client is None:
+        if not (_BOT_TOKEN and _API_ID and _API_HASH):
+            raise HTTPException(status_code=503, detail="Telegram streaming is not configured")
+        _stream_client = Client(
+            "starfall_file_stream",
+            api_id=_API_ID,
+            api_hash=_API_HASH,
+            bot_token=_BOT_TOKEN,
+            in_memory=True,
+            no_updates=True,
+        )
+        await _stream_client.start()
+    return _stream_client
+
+
+@app.get("/dl/{token}/{filename:path}")
+async def telegram_file_stream(token: str, filename: str):
+    payload = decode_file_token(token, time(), _BOT_TOKEN, _ACCESS_PASSWORD)
+    if not payload:
+        raise HTTPException(status_code=403, detail="This download link is invalid or expired")
+    chat_id, message_id, _ = payload
+    client = await _get_stream_client()
+    message = await client.get_messages(chat_id, message_id)
+    media = next((getattr(message, key, None) for key in ("document", "video", "audio", "animation", "voice") if getattr(message, key, None)), None)
+    if not media:
+        raise HTTPException(status_code=404, detail="Telegram file not found")
+
+    async def body():
+        async for chunk in client.stream_media(message):
+            yield chunk
+
+    safe_name = (getattr(media, "file_name", None) or filename or "telegram-file").replace('"', "")
+    headers = {
+        "Content-Disposition": f'attachment; filename="{safe_name}"',
+        "Cache-Control": "private, no-store",
+    }
+    file_size = int(getattr(media, "file_size", 0) or 0)
+    if file_size > 0:
+        headers["Content-Length"] = str(file_size)
+    return StreamingResponse(
+        body(),
+        media_type=getattr(media, "mime_type", None) or "application/octet-stream",
+        headers=headers,
+    )
 
 
 async def re_verify(paused, resumed, hash_id):

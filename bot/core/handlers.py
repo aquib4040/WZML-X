@@ -347,6 +347,13 @@ def add_handlers():
     )
     TgClient.bot.add_handler(
         MessageHandler(
+            file_link,
+            filters=command(BotCommands.LinkCommand, case_sensitive=True)
+            & CustomFilters.authorized,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
             sites,
             filters=command(BotCommands.SitesCommand, case_sensitive=True)
             & CustomFilters.authorized,

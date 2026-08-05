@@ -1,5 +1,5 @@
 import re
-from asyncio import gather, sleep
+from asyncio import Event, gather, sleep
 from contextlib import suppress
 from os import path as ospath, walk
 from re import sub
@@ -157,6 +157,11 @@ class TaskConfig:
         self.pm_msg = None
         self.file_details = {}
         self.mode = tuple()
+        self._multi_step_done = Event()
+
+    def mark_multi_step_done(self):
+        if not self._multi_step_done.is_set():
+            self._multi_step_done.set()
 
     def _set_mode_engine(self):
         self.source_url = (
@@ -629,7 +634,10 @@ class TaskConfig:
 
     @new_task
     async def run_multi(self, input_list, obj):
-        await sleep(7)
+        # A normal -i chain advances only after this item has completely
+        # downloaded and uploaded (or failed). Shared-folder jobs signal after
+        # their current download is moved into the common workspace.
+        await self._multi_step_done.wait()
         if not self.multi_tag and self.multi > 1:
             self.multi_tag = token_hex(3)
             multi_tags.add(self.multi_tag)
