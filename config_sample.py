@@ -347,7 +347,7 @@ TMDB_ACCESS_TOKEN = ""
 AUTORENAME = True
 RENAME_METHOD = "auto"
 LEECH_FILENAME_REMNAME_AUTO = "[S{season}E{episode}] {title}   {resolution} {bit} {ott} {quality} {lib} [Tamil] ESub"
-LEECH_FILENAME_REMNAME_REGEX = ""
+LEECH_FILENAME_REMNAME_REGEX = r"www\.1TamilMV\.[^\s]+"
 SUBTITLE_TRANSLATE_TARGET = "en"
 INTRO_SUBTITLE_TEXT = ""
 
