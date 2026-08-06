@@ -1653,6 +1653,34 @@ async def send_user_settings(_, message):
 
 
 @new_task
+async def set_custom_thumbnail(_, message):
+    """Save the replied photo/document as the user's persistent thumbnail."""
+    reply = message.reply_to_message
+    if not reply or not (reply.photo or reply.document):
+        await send_message(
+            message,
+            "Reply to a photo or image document with <code>-t</code> to set your custom thumbnail.",
+        )
+        return
+    user_id = message.from_user.id
+    try:
+        path = await create_thumb(reply, user_id)
+    except Exception as error:
+        await send_message(
+            message,
+            f"Unable to use that file as a thumbnail: <code>{escape(str(error)[:300])}</code>",
+        )
+        return
+    update_user_ldata(user_id, "THUMBNAIL", path)
+    await database.update_user_doc(user_id, "THUMBNAIL", path)
+    await send_message(
+        message,
+        "✅ <b>Custom thumbnail saved.</b> It will be used for your future leech uploads.",
+        photo=path,
+    )
+
+
+@new_task
 async def add_file(_, message, ftype, rfunc):
     user_id = message.from_user.id
     handler_dict[user_id] = False

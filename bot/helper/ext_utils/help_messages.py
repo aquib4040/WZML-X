@@ -60,6 +60,7 @@ link6 will get uploaded normally alone
 thumb = """<b>Thumbnail for current task</b>: -t
 
 /cmd link -t image-url or tg-message-link (doc or photo) or none (file without thumb)
+Reply to a photo/image document with <code>-t</code> to save it as your persistent custom thumbnail.
 Supports any direct image URL (jpg, png, webp, etc.) or a Telegram message link containing a photo/document."""
 
 split_size = """<b>Split size for current task</b>: -sp

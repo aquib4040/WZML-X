@@ -485,6 +485,12 @@ def add_handlers():
         )
     )
     TgClient.bot.add_handler(
+        MessageHandler(
+            set_custom_thumbnail,
+            filters=regex(r"^-t\s*$") & CustomFilters.authorized_uset,
+        )
+    )
+    TgClient.bot.add_handler(
         CallbackQueryHandler(edit_user_settings, filters=regex("^userset"))
     )
     TgClient.bot.add_handler(
