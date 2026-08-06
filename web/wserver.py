@@ -27,7 +27,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pyrogram import Client
 from time import time
-from file_stream_utils import decode_file_token
+from file_stream_utils import content_disposition, decode_file_token
 from fastapi.templating import Jinja2Templates
 from sabnzbdapi import SabnzbdClient
 from aioqbt.exc import AQError
@@ -243,9 +243,9 @@ async def telegram_file_stream(token: str, filename: str):
         async for chunk in client.stream_media(message):
             yield chunk
 
-    safe_name = (getattr(media, "file_name", None) or filename or "telegram-file").replace('"', "")
+    safe_name = getattr(media, "file_name", None) or filename or "telegram-file"
     headers = {
-        "Content-Disposition": f'attachment; filename="{safe_name}"',
+        "Content-Disposition": content_disposition(safe_name),
         "Cache-Control": "private, no-store",
     }
     file_size = int(getattr(media, "file_size", 0) or 0)

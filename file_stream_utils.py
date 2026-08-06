@@ -2,6 +2,24 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from hashlib import sha256
 from hmac import compare_digest, new as hmac_new
 from json import dumps, loads
+from unicodedata import normalize
+from urllib.parse import quote
+
+
+def content_disposition(filename):
+    """Return an RFC 6266 header that is safe for Starlette's Latin-1 transport."""
+    filename = str(filename or "telegram-file").replace("\r", "").replace("\n", "")
+    filename = filename.replace('"', "'").replace("\\", "_") or "telegram-file"
+
+    # ``filename`` is the compatibility fallback and must stay ASCII. Modern
+    # clients recover the exact UTF-8 name from RFC 5987's ``filename*``.
+    fallback = normalize("NFKD", filename).encode("ascii", "ignore").decode("ascii")
+    fallback = "".join(char if 32 <= ord(char) <= 126 else "_" for char in fallback)
+    fallback = " ".join(fallback.replace('"', "'").replace("\\", "_").split())
+    if not fallback:
+        fallback = "telegram-file"
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
 
 
 def _secret(bot_token, access_password):
