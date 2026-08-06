@@ -75,6 +75,9 @@ async def poster_search(_, message):
         preview = await render_poster_option(metadata, message.from_user.id, user_dict, "1")
         await delete_message(wait)
         sent = await send_message(message, _summary(metadata), buttons.build_menu(3), photo=preview)
+        if not getattr(sent, "id", None):
+            LOGGER.warning(f"Poster result delivery failed: {sent}")
+            return
         POSTER_SEARCH_CACHE[(message.from_user.id, sent.id)] = metadata
     except Exception as err:
         LOGGER.error(f"Poster search failed: {err}", exc_info=True)

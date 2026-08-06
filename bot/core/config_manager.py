@@ -233,6 +233,7 @@ class Config:
     QUEUE_ALL = 0
     QUEUE_DOWNLOAD = 0
     QUEUE_UPLOAD = 0
+    QUEUE_BYPASS_SIZE_GB = 1
     RCLONE_FLAGS = ""
     RCLONE_PATH = ""
     RENAME_METHOD = "auto"

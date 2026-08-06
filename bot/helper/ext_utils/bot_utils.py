@@ -26,6 +26,7 @@ from .help_messages import (
 from .telegraph_helper import telegraph
 
 COMMAND_USAGE = {}
+BACKGROUND_TASKS = set()
 
 THREAD_POOL = ThreadPoolExecutor(max_workers=500)
 _SERVICE_PWD_SALT = b"wzmlx_v3_service_pwd_salt"
@@ -114,7 +115,13 @@ def create_help_buttons():
 
 
 def compare_versions(v1, v2):
-    v1, v2 = (list(map(int, v.split("-")[0][1:].split("."))) for v in (v1, v2))
+    try:
+        v1, v2 = (
+            list(map(int, str(v).split("-")[0].lstrip("vV").split(".")))
+            for v in (v1, v2)
+        )
+    except (TypeError, ValueError):
+        return "Version comparison unavailable"
     return (
         "New Version Update is Available! Check Now!"
         if v1 < v2
@@ -361,6 +368,7 @@ def new_task(func):
             LOGGER.error("Failed to notify command error", exc_info=True)
 
     def _log_task_result(task, update):
+        BACKGROUND_TASKS.discard(task)
         if task.cancelled():
             return
         try:
@@ -373,11 +381,14 @@ def new_task(func):
             f"Command task failed in {func.__name__}: {error}",
             exc_info=(type(error), error, error.__traceback__),
         )
-        bot_loop.create_task(_notify_error(update, error))
+        notify_task = bot_loop.create_task(_notify_error(update, error))
+        BACKGROUND_TASKS.add(notify_task)
+        notify_task.add_done_callback(BACKGROUND_TASKS.discard)
 
     @wraps(func)
     async def wrapper(*args, **kwargs):
         task = bot_loop.create_task(func(*args, **kwargs))
+        BACKGROUND_TASKS.add(task)
         update = args[1] if len(args) > 1 else None
         task.add_done_callback(lambda done: _log_task_result(done, update))
         return task

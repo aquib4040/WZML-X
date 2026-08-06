@@ -435,15 +435,20 @@ async def generate_merge_preview(state):
 
     state["busy"] = True
     preview_path = ospath.join(
-        ospath.dirname(input_path), f"vt_preview_{state['task_id']}.mkv"
+        ospath.dirname(input_path), f"vt_preview_{state['task_id']}.mp4"
     )
     try:
-        from ..ext_utils.media_utils import get_media_info
+        from ..ext_utils.media_utils import get_media_info, get_streams
 
         duration = float((await get_media_info(input_path))[0] or 0)
         preview_duration = min(120, max(1, int(duration or 120)))
         start = max(0, (duration - preview_duration) / 2) if duration else 0
-        cmd = [
+        if await aiopath.exists(preview_path):
+            await remove(preview_path)
+        legacy_preview = ospath.splitext(preview_path)[0] + ".mkv"
+        if await aiopath.exists(legacy_preview):
+            await remove(legacy_preview)
+        base_cmd = [
             BinConfig.FFMPEG_NAME, "-hide_banner", "-loglevel", "error", "-y",
             "-ss", f"{start:.3f}", "-i", input_path,
         ]
@@ -456,16 +461,16 @@ async def generate_merge_preview(state):
             raise ValueError("Send and select a new audio track before creating a preview.")
         for item in selected:
             if item.get("delay_ms"):
-                cmd.extend(["-itsoffset", f"{int(item['delay_ms']) / 1000:.3f}"])
-            cmd.extend(["-ss", f"{start:.3f}", "-i", item["path"]])
-        cmd.extend(["-copyts", "-start_at_zero"])
-        cmd.extend(["-map", "0:v:0"])
+                base_cmd.extend(["-itsoffset", f"{int(item['delay_ms']) / 1000:.3f}"])
+            base_cmd.extend(["-ss", f"{start:.3f}", "-i", item["path"]])
+        mapping = ["-copyts", "-start_at_zero", "-map", "0:v:0"]
         for input_index, item in enumerate(selected, start=1):
-            cmd.extend(["-map", f"{input_index}:a:{int(item.get('stream_index', 0))}?"])
+            mapping.extend(["-map", f"{input_index}:a:{int(item.get('stream_index', 0))}?"])
         if not state.get("remove_original_audio"):
-            cmd.extend(["-map", "0:a?"])
+            mapping.extend(["-map", "0:a?"])
+        metadata = []
         for output_index, item in enumerate(selected):
-            cmd.extend(
+            metadata.extend(
                 [
                     f"-metadata:s:a:{output_index}",
                     f"language={_normalize_language(item.get('language', 'und'))}",
@@ -474,26 +479,50 @@ async def generate_merge_preview(state):
                 ]
             )
         if selected:
-            cmd.extend(["-disposition:a", "0", "-disposition:a:0", "default"])
-        cmd.extend(
-            [
-                "-t", str(preview_duration),
-                "-c", "copy",
-                "-avoid_negative_ts", "make_zero",
-                preview_path,
-            ]
+            metadata.extend(["-disposition:a", "0", "-disposition:a:0", "default"])
+        common_tail = [
+            "-t", str(preview_duration), "-c:v", "copy", "-c:a", "aac",
+            "-b:a", "192k", "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart", preview_path,
+        ]
+        streams = await get_streams(input_path)
+        video_codec = next(
+            (
+                str(stream.get("codec_name") or "").lower()
+                for stream in streams
+                if stream.get("codec_type") == "video"
+            ),
+            "",
         )
-        result = await cmd_exec(cmd)
+        copy_compatible = video_codec in {"h264", "mpeg4"}
+        result = (
+            await cmd_exec(base_cmd + mapping + metadata + common_tail)
+            if copy_compatible
+            else ("", f"Video codec {video_codec or 'unknown'} requires conversion", 1)
+        )
+        preview_mode = "stream copy"
         if result[2] != 0 or not await aiopath.isfile(preview_path):
-            raise RuntimeError((result[1] or "FFmpeg preview failed")[-500:])
+            if await aiopath.exists(preview_path):
+                await remove(preview_path)
+            threads = max(1, min(4, get_ffmpeg_threads()))
+            fallback_tail = [
+                "-t", str(preview_duration), "-c:v", "libx264", "-preset", "veryfast",
+                "-crf", "25", "-pix_fmt", "yuv420p", "-threads", str(threads),
+                "-c:a", "aac", "-b:a", "160k", "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart", preview_path,
+            ]
+            result = await cmd_exec(base_cmd + mapping + metadata + fallback_tail)
+            preview_mode = "compatible transcode"
+        if result[2] != 0 or not await aiopath.isfile(preview_path):
+            raise RuntimeError((result[1] or "FFmpeg could not create a compatible preview")[-700:])
         previous = state.get("preview_message")
         if previous:
             with suppress(Exception):
                 await previous.delete()
         state["preview_message"] = await listener.message.reply_video(
             preview_path,
-            caption="<b>120-second middle preview (stream copy)</b>",
-            supports_streaming=False,
+            caption=f"<b>{preview_duration}-second middle preview ({preview_mode})</b>",
+            supports_streaming=True,
         )
         state["preview_path"] = preview_path
         state["preview_stale"] = False
@@ -605,6 +634,14 @@ async def _create_intro_subtitle(listener, dir_path):
         or ""
     ).strip()
     if not text:
+        return None
+    if not dir_path:
+        LOGGER.warning("Intro subtitle skipped: task directory is unavailable")
+        return None
+    try:
+        await makedirs(dir_path, exist_ok=True)
+    except OSError as error:
+        LOGGER.warning(f"Intro subtitle skipped; cannot create {dir_path}: {error}")
         return None
     out_path = ospath.join(dir_path, f"intro_{listener.mid}.ass")
     duration = int(getattr(Config, "INTRO_SUBTITLE_DURATION", 5) or 5)

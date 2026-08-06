@@ -49,6 +49,7 @@ from ...ext_utils.status_utils import get_readable_file_size, get_readable_time
 from ...telegram_helper.message_utils import send_message
 from ...ext_utils.media_utils import (
     apply_caption_word_replace,
+    apply_filename_word_replace,
     apply_regex_rename,
     apply_template_rename,
     build_caption_metadata,
@@ -400,10 +401,6 @@ class TelegramUploader:
                 lambda m: {"%%": "|", "&%&": "{", "$%$": "}"}[m.group()],
                 cap_mono,
             )
-        cap_mono = apply_caption_word_replace(
-            cap_mono, self._caption_word_replace
-        )
-
         if len(file_) > 255:
             if is_archive(file_):
                 name = get_base_name(file_)
@@ -424,6 +421,17 @@ class TelegramUploader:
         elif self._lsuffix:
             name, ext = ospath.splitext(file_)
             file_ = f"{name}{self._lsuffix}{ext}"
+
+        if self._caption_word_replace:
+            try:
+                file_ = apply_filename_word_replace(
+                    file_, self._caption_word_replace
+                )
+            except ValueError as error:
+                LOGGER.warning(f"Filename replacement skipped for {pre_file_}: {error}")
+            cap_mono = apply_caption_word_replace(
+                cap_mono, self._caption_word_replace
+            )
 
         if pre_file_ != file_:
             new_path = ospath.join(dirpath, file_)
@@ -814,6 +822,7 @@ class TelegramUploader:
         o_path,
         force_document=False,
         caption_followup=None,
+        transient_attempt=0,
     ):
         if not await aiopath.exists(o_path):
             LOGGER.warning(f"{o_path} disappeared before upload; skipping.")
@@ -859,20 +868,20 @@ class TelegramUploader:
                     if "AUTO_THUMBNAIL" in self._listener.user_dict
                     else Config.AUTO_THUMBNAIL
                 )
+                thumbnail_mode = str(
+                    self._listener.user_dict.get(
+                        "THUMBNAIL_MODE", Config.THUMBNAIL_MODE
+                    )
+                    or "automatic"
+                ).lower()
                 if getattr(self._listener, "skip_auto_thumbnail", False):
                     auto_thumb_enabled = False
                 if getattr(self._listener, "force_auto_thumbnail", False):
                     auto_thumb_enabled = True
-                if auto_thumb_enabled:
+                if auto_thumb_enabled or thumbnail_mode == "manual":
                     LOGGER.info(f"Auto-thumbnail enabled for: {file}")
                     try:
                         as_doc = self._listener.as_doc
-                        thumbnail_mode = str(
-                            self._listener.user_dict.get(
-                                "THUMBNAIL_MODE", Config.THUMBNAIL_MODE
-                            )
-                            or "automatic"
-                        ).lower()
                         if thumbnail_mode == "manual":
                             landscape = f"thumbnails/{self._listener.user_id}_landscape.jpg"
                             portrait = f"thumbnails/{self._listener.user_id}_poster.jpg"
@@ -1197,6 +1206,16 @@ class TelegramUploader:
                 await remove(doc_thumb)
             err_type = "RPCError: " if isinstance(err, RPCError) else ""
             LOGGER.error(f"{err_type}{err}. Path: {self._up_path}", exc_info=True)
+            if "INTERDCCALL" in f"{type(err).__name__}: {err}".upper() and transient_attempt < 2:
+                await sleep(2 ** (transient_attempt + 1))
+                return await self._upload_file(
+                    cap_mono,
+                    file,
+                    o_path,
+                    force_document,
+                    caption_followup,
+                    transient_attempt + 1,
+                )
             if (
                 isinstance(err, BadRequest)
                 and key != "documents"

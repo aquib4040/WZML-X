@@ -103,6 +103,7 @@ TG_FLOOD_WAIT_MULTIPLIER = 1.1
 MAX_PARALLEL_TASKS = 0  # 0 = safe profile decides (2 on a 2-vCPU/4-GB VPS)
 SAFE_CPU_PERCENT = 88
 SAFE_FREE_RAM_MB = 768
+QUEUE_BYPASS_SIZE_GB = 1  # Known tasks below this size bypass slot limits; safety guards still apply. 0 disables.
 
 # Aria2 max-speed but safe defaults. Direct downloads use more connections,
 # while torrent upload bandwidth is capped so Telegram uploads stay fast.

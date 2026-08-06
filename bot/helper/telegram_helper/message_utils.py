@@ -59,6 +59,7 @@ def _parse_chat_target(target):
 
 
 async def send_message(message, text, buttons=None, block=True, photo=None, **kwargs):
+    transient_attempt = int(kwargs.pop("_transient_attempt", 0) or 0)
     text = _fit_telegram_text(text)
     try:
         parsed_target = _parse_chat_target(message)
@@ -107,7 +108,19 @@ async def send_message(message, text, buttons=None, block=True, photo=None, **kw
             except (PhotoInvalidDimensions, WebpageCurlFailed, MediaEmpty):
                 LOGGER.error("Invalid photo dimensions or empty media", exc_info=True)
                 return await send_message(message, text, buttons, block, None, **kwargs)
-            except Exception:
+            except Exception as error:
+                error_text = f"{type(error).__name__}: {error}".upper()
+                if "INTERDC" in error_text and transient_attempt < 2:
+                    await sleep(2 ** (transient_attempt + 1))
+                    return await send_message(
+                        message,
+                        text,
+                        buttons,
+                        block,
+                        photo,
+                        _transient_attempt=transient_attempt + 1,
+                        **kwargs,
+                    )
                 LOGGER.error("Error while sending photo", exc_info=True)
                 return await send_message(message, text, buttons, block, None, **kwargs)
         if isinstance(message, int):
@@ -147,6 +160,17 @@ async def send_message(message, text, buttons=None, block=True, photo=None, **kw
             return await send_message(message, text, buttons, block, photo)
         raise
     except Exception as e:
+        if "INTERDC" in f"{type(e).__name__}: {e}".upper() and transient_attempt < 2:
+            await sleep(2 ** (transient_attempt + 1))
+            return await send_message(
+                message,
+                text,
+                buttons,
+                block,
+                photo,
+                _transient_attempt=transient_attempt + 1,
+                **kwargs,
+            )
         LOGGER.error(str(e), exc_info=True)
         return str(e)
 

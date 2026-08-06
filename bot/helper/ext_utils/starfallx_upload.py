@@ -222,6 +222,7 @@ class StarFallXUploadManager:
         self._pin_unlocked = {}
         self._last_queue_reason = ""
         self._destination_cache = {}
+        self._destination_quarantine = set()
 
     def enabled(self):
         return str(Config.UPLOAD_ENGINE or "").lower() == "starfallx"
@@ -241,9 +242,23 @@ class StarFallXUploadManager:
             self._destination_cache[cache_key] = (True, time() + 300)
             return True
         except Exception as error:
-            self._destination_cache[cache_key] = (False, time() + 30)
+            error_text = f"{type(error).__name__}: {error}".upper()
+            permanent = label.lower().startswith("global bot") and any(
+                code in error_text
+                for code in (
+                    "CHANNEL_INVALID",
+                    "CHAT_ADMIN_REQUIRED",
+                    "PEER_ID_INVALID",
+                    "USER_NOT_PARTICIPANT",
+                )
+            )
+            expiry = float("inf") if permanent else time() + 30
+            self._destination_cache[cache_key] = (False, expiry)
+            if permanent:
+                self._destination_quarantine.add(cache_key)
             LOGGER.warning(
-                f"Skipping {label}: upload destination {chat_id} is inaccessible: {error}"
+                f"{'Quarantining' if permanent else 'Skipping'} {label}: "
+                f"upload destination {chat_id} is inaccessible: {error}"
             )
             return False
 
@@ -935,6 +950,7 @@ class StarFallXUploadManager:
         self._cooldown.clear()
         self._meta.clear()
         self._destination_cache.clear()
+        self._destination_quarantine.clear()
         self._main_active = 0
         for client in clients:
             with contextlib.suppress(Exception):

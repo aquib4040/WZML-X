@@ -5,6 +5,7 @@ from re import search as research
 from time import time
 
 from aiofiles.os import path as aiopath
+from httpx import AsyncClient
 from psutil import (
     Process,
     boot_time,
@@ -67,6 +68,37 @@ commands = {
         r"v?([\d.]+)",
     ),
 }
+
+
+async def _remote_repo_version():
+    repo = str(getattr(Config, "UPSTREAM_REPO", "") or "").strip()
+    if not repo and await aiopath.exists(".git"):
+        repo = (await cmd_exec(["git", "remote", "get-url", "origin"]))[0].strip()
+    branch = str(getattr(Config, "UPSTREAM_BRANCH", "") or "master").strip()
+    if repo.startswith("git@github.com:"):
+        repo = "https://github.com/" + repo.split(":", 1)[1]
+    repo = repo.removesuffix(".git").rstrip("/")
+    if "github.com/" not in repo:
+        return None
+    slug = repo.split("github.com/", 1)[1]
+    url = f"https://raw.githubusercontent.com/{slug}/{branch}/bot/version.py"
+    try:
+        async with AsyncClient(timeout=10, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+        values = {
+            key: research(rf'{key}\s*=\s*["\']([^"\']+)', response.text)
+            for key in ("MAJOR", "MINOR", "PATCH", "STATE")
+        }
+        if all(values[key] for key in ("MAJOR", "MINOR", "PATCH")):
+            state = values["STATE"].group(1) if values["STATE"] else ""
+            suffix = f"-{state}" if state else ""
+            return "v" + ".".join(values[key].group(1) for key in ("MAJOR", "MINOR", "PATCH")) + suffix
+        direct = research(r'v\d+(?:\.\d+){2}(?:-[\w.]+)?', response.text)
+        return direct.group(0) if direct else None
+    except Exception as error:
+        LOGGER.warning(f"Repo version lookup failed: {error}")
+        return None
 
 
 async def get_stats(event, key="home"):
@@ -166,20 +198,21 @@ async def get_stats(event, key="home"):
                     "git log -1 --pretty=format:'<code>%s</code> <b>By</b> %an'", True
                 )
             )[0]
-        official_v = (
-            await cmd_exec(
-                f"curl -o latestversion.py https://raw.githubusercontent.com/SilentDemonSD/WZML-X/{Config.UPSTREAM_BRANCH}/bot/version.py -s && python3 latestversion.py && rm latestversion.py",
-                True,
-            )
-        )[0]
+        official_v = await _remote_repo_version()
+        latest_label = official_v or "Unavailable"
+        remarks = (
+            compare_versions(get_version(), official_v)
+            if official_v
+            else "Remote version is unavailable; try again later."
+        )
         msg = f"""⌬ <b><i>Repo Statistics :</i></b>
 │
 ┟ <b>Bot Updated :</b> {last_commit}
 ┠ <b>Current Version :</b> {get_version()}
-┠ <b>Latest Version :</b> {official_v}
+┠ <b>Latest Version :</b> {latest_label}
 ┖ <b>Last ChangeLog :</b> {changelog}
 
-⌬ <b>REMARKS :</b> <code>{compare_versions(get_version(), official_v)}</code>
+⌬ <b>REMARKS :</b> <code>{remarks}</code>
     """
     elif key == "stpkgs":
         ver = bot_cache.get("eng_versions", {})

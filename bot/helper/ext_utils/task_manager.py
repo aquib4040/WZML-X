@@ -123,6 +123,16 @@ async def check_running_tasks(listener, state="dl"):
     )
     event = None
     is_over_limit = False
+    try:
+        bypass_limit = float(getattr(Config, "QUEUE_BYPASS_SIZE_GB", 1) or 0)
+        known_size = int(getattr(listener, "size", 0) or 0)
+    except (TypeError, ValueError):
+        bypass_limit, known_size = 0, 0
+    bypass_slots = bool(
+        bypass_limit > 0
+        and known_size > 0
+        and known_size < bypass_limit * 1024**3
+    )
     async with queue_dict_lock:
         if state == "up" and listener.mid in non_queued_dl:
             non_queued_dl.remove(listener.mid)
@@ -135,24 +145,24 @@ async def check_running_tasks(listener, state="dl"):
             dl_count = len(non_queued_dl)
             up_count = len(non_queued_up)
             t_count = dl_count if state == "dl" else up_count
-            is_over_limit = (
-                all_limit
-                and dl_count + up_count >= all_limit
-                and (not state_limit or t_count >= state_limit)
-            ) or (state_limit and t_count >= state_limit)
-            if not is_over_limit and dl_count + up_count:
-                resource_busy, resource_reason = resources_overloaded()
-                if resource_busy:
-                    is_over_limit = True
-                    LOGGER.warning(
-                        f"Queueing task {listener.mid}; VPS safety guard active: {resource_reason}"
-                    )
-            if is_over_limit:
-                event = Event()
-                if state == "dl":
-                    queued_dl[listener.mid] = event
-                else:
-                    queued_up[listener.mid] = event
+            if not bypass_slots:
+                is_over_limit = (
+                    all_limit
+                    and dl_count + up_count >= all_limit
+                    and (not state_limit or t_count >= state_limit)
+                ) or (state_limit and t_count >= state_limit)
+        resource_busy, resource_reason = resources_overloaded()
+        if resource_busy:
+            is_over_limit = True
+            LOGGER.warning(
+                f"Queueing task {listener.mid}; VPS safety guard active: {resource_reason}"
+            )
+        if is_over_limit:
+            event = Event()
+            if state == "dl":
+                queued_dl[listener.mid] = event
+            else:
+                queued_up[listener.mid] = event
         if not is_over_limit:
             if state == "up":
                 non_queued_up.add(listener.mid)
@@ -160,6 +170,31 @@ async def check_running_tasks(listener, state="dl"):
                 non_queued_dl.add(listener.mid)
 
     return is_over_limit, event
+
+
+async def release_small_queued_task(listener, state="dl"):
+    """Atomically release an unknown-size task once it is known to be small."""
+    try:
+        limit = float(getattr(Config, "QUEUE_BYPASS_SIZE_GB", 1) or 0)
+        size = int(getattr(listener, "size", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if limit <= 0 or size <= 0 or size >= limit * 1024**3:
+        return False
+    if resources_overloaded()[0]:
+        return False
+    queued = queued_dl if state == "dl" else queued_up
+    active = non_queued_dl if state == "dl" else non_queued_up
+    async with queue_dict_lock:
+        event = queued.pop(listener.mid, None)
+        if event is None:
+            return False
+        active.add(listener.mid)
+        event.set()
+    LOGGER.info(
+        f"Released small {state} task {listener.mid} from slot queue ({get_readable_file_size(size)})"
+    )
+    return True
 
 
 async def start_dl_from_queued(mid: int):
@@ -184,7 +219,7 @@ async def start_from_queued():
     await start_rss_from_queued()
 
     resource_busy, resource_reason = resources_overloaded()
-    if resource_busy and (non_queued_dl or non_queued_up):
+    if resource_busy and (queued_dl or queued_up or non_queued_dl or non_queued_up):
         LOGGER.warning(f"Keeping queued tasks paused; VPS safety guard active: {resource_reason}")
         return
 

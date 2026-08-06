@@ -27,6 +27,9 @@ from ..ext_utils.media_utils import (
 POSTER_SIZE = (1280, 720)
 TMDB_IMAGE = "https://image.tmdb.org/t/p/{size}{path}"
 POSTER_TEMPLATE_COUNT = 10
+_IMDB_DISABLED_UNTIL = 0.0
+_IMDB_FAILURES = 0
+_PROVIDER_CACHE = {}
 
 
 def _bool(value, default=False):
@@ -649,13 +652,22 @@ async def _anime_search(title):
 
 
 async def _imdb_search(title, year=None):
+    global _IMDB_DISABLED_UNTIL, _IMDB_FAILURES
+    if time() < _IMDB_DISABLED_UNTIL:
+        return {}
     try:
         from ...modules.imdb import get_poster
 
         query = f"{title} {year}" if year and not search(r"\b\d{4}\b", title) else title
         data = await sync_to_async(get_poster, query, bulk=False, id=False, file=None)
         if not data:
+            _IMDB_FAILURES += 1
+            if _IMDB_FAILURES >= 3:
+                _IMDB_DISABLED_UNTIL = time() + 1800
+                _IMDB_FAILURES = 0
+                LOGGER.warning("IMDb lookup paused for 30 minutes after repeated provider failures")
             return {}
+        _IMDB_FAILURES = 0
         return {
             "provider": "IMDb",
             "category": "tv" if data.get("kind") == "Series" else "movie",
@@ -674,7 +686,12 @@ async def _imdb_search(title, year=None):
             "poster_url": data.get("poster") or "",
         }
     except Exception as err:
-        LOGGER.warning(f"IMDb poster search failed for '{title}': {err}")
+        error_text = str(err)
+        if "403" in error_text or "unauthorized" in error_text.lower() or "forbidden" in error_text.lower():
+            _IMDB_DISABLED_UNTIL = time() + 1800
+            LOGGER.warning("IMDb lookup disabled for 30 minutes after authorization failure; using fallback providers")
+        else:
+            LOGGER.warning(f"IMDb poster search failed for '{title}': {err}")
         return {}
 
 
@@ -713,17 +730,19 @@ async def _metadata(
         title = _clean_search_title(seed)
     anime_hint = _looks_like_anime_name(seed, title)
 
-    provider = {}
-    if anime_hint:
-        provider = await _anime_search(title)
+    cache_key = (title.casefold(), str(base.get("year") or ""), anime_hint)
+    cached = _PROVIDER_CACHE.get(cache_key)
+    provider = dict(cached[1]) if cached and cached[0] > time() else {}
+    cache_hit = bool(provider)
     if not provider:
-        provider = await _tmdb_search(title, base.get("year"))
-    if not provider and not anime_hint:
-        provider = await _anime_search(title)
-    if not provider and anime_hint:
-        provider = await _anime_search(title)
+        if anime_hint:
+            provider = await _anime_search(title)
+        if not provider:
+            provider = await _tmdb_search(title, base.get("year"))
+        if not provider:
+            provider = await _anime_search(title)
 
-    imdb = await _imdb_search(
+    imdb = {} if cache_hit else await _imdb_search(
         provider.get("title") or title,
         provider.get("year") or base.get("year"),
     )
@@ -752,6 +771,8 @@ async def _metadata(
                 provider[key] = imdb[key]
         if not provider.get("landscape_url") and imdb.get("poster_url"):
             provider["landscape_url"] = imdb["poster_url"]
+    if provider:
+        _PROVIDER_CACHE[cache_key] = (time() + 3600, dict(provider))
 
     tv_hint = bool(
         search(

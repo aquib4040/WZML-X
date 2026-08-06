@@ -1721,6 +1721,18 @@ def apply_caption_word_replace(text, rules):
     return result
 
 
+def apply_filename_word_replace(filename, rules):
+    """Apply caption rules to a filename without allowing its extension to change."""
+    original = str(filename or "")
+    stem, ext = ospath.splitext(original)
+    replaced = apply_caption_word_replace(stem, rules)
+    replaced = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", replaced)
+    replaced = re.sub(r"\s+", " ", replaced).strip(" .-_")
+    if not replaced:
+        raise ValueError("Caption replacement produced an empty filename")
+    return f"{replaced[: max(1, 255 - len(ext))].rstrip(' .-_')}{ext}"
+
+
 async def _resolve_imdb_title(title, year=None):
     title = _clean_rename_token(title)
     if not title or title.lower() == "unknown":

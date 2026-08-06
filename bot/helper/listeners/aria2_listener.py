@@ -10,7 +10,11 @@ from ...core.torrent_manager import TorrentManager, is_metadata, aria2_name
 from ..ext_utils.bot_utils import bt_selection_buttons
 from ..ext_utils.files_utils import clean_unwanted
 from ..ext_utils.status_utils import get_task_by_gid
-from ..ext_utils.task_manager import stop_duplicate_check, limit_checker
+from ..ext_utils.task_manager import (
+    limit_checker,
+    release_small_queued_task,
+    stop_duplicate_check,
+)
 from ..mirror_leech_utils.status_utils.aria2_status import Aria2Status
 from ..telegram_helper.message_utils import (
     send_message,
@@ -21,10 +25,14 @@ from ..telegram_helper.message_utils import (
 
 async def _on_download_started(api, data):
     gid = data["params"][0]["gid"]
-    with suppress(TimeoutError, ClientError, Exception):
+    download, options = None, None
+    try:
         download, options = await api.tellStatus(gid), await api.getOption(gid)
         if options.get("follow-torrent", "") == "false":
             return
+    except (TimeoutError, ClientError, Exception) as error:
+        LOGGER.warning(f"Unable to read Aria2 state for {gid}: {error}")
+        return
     if is_metadata(download):
         LOGGER.info(f"onDownloadStarted: {gid} METADATA")
         await sleep(1)
@@ -60,6 +68,7 @@ async def _on_download_started(api, data):
             return
 
         task.listener.size = int(download.get("totalLength", "0"))
+        await release_small_queued_task(task.listener)
         mmsg = await limit_checker(task.listener)
         if mmsg:
             await TorrentManager.aria2_remove(download)

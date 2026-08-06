@@ -437,7 +437,7 @@ user_settings_text["LEECH_CAPTION"] = (
 )
 user_settings_text["CAPTION_WORD_REPLACE"] = (
     "Replacement Rules",
-    "Sequential word replacement/removal for leech and poster captions only.",
+    "Sequential replacement/removal for filenames, leech captions, and poster captions.",
     "Send rules separated by <code>|</code>. Use "
     "<code>word1:replacement1 | word2:replacement2</code>; a word without "
     "<code>:</code> is removed.\n<b>Time Left:</b> <code>60 sec</code>",
@@ -641,6 +641,38 @@ Unlock to view, add, test, remove, or export helper token data."""
         buttons.data_button("Close", f"userset {user_id} close", "footer")
         btns = buttons.build_menu(1)
 
+    elif stype == "thumbmanual":
+        mode = str(user_dict.get("THUMBNAIL_MODE", Config.THUMBNAIL_MODE) or "automatic").lower()
+        landscape = f"thumbnails/{user_id}_landscape.jpg"
+        poster = f"thumbnails/{user_id}_poster.jpg"
+        generic = f"thumbnails/{user_id}.jpg"
+        land_exists = await aiopath.exists(landscape)
+        poster_exists = await aiopath.exists(poster)
+        generic_exists = await aiopath.exists(generic)
+        buttons.data_button(
+            f"Mode: {mode.title()}",
+            f"userset {user_id} thumbmode {'manual' if mode != 'manual' else 'automatic'}",
+        )
+        for label, kind, exists in (
+            ("Landscape", "landscape", land_exists),
+            ("Portrait Poster", "poster", poster_exists),
+        ):
+            buttons.data_button(f"Upload {label}", f"userset {user_id} thumbart upload {kind}")
+            if exists:
+                buttons.data_button(f"View {label}", f"userset {user_id} thumbart view {kind}")
+                buttons.data_button(f"Remove {label}", f"userset {user_id} thumbart remove {kind}")
+        buttons.data_button("Back", f"userset {user_id} leech", "footer")
+        buttons.data_button("Close", f"userset {user_id} close", "footer")
+        btns = buttons.build_menu(2)
+        text = (
+            "<b>Manual Thumbnail Artwork</b>\n\n"
+            f"Mode: <b>{escape(mode.title())}</b>\n"
+            f"Landscape: <b>{'Saved' if land_exists else 'Not saved'}</b>\n"
+            f"Portrait poster: <b>{'Saved' if poster_exists else 'Not saved'}</b>\n"
+            f"Generic fallback: <b>{'Available' if generic_exists else 'Not saved'}</b>\n\n"
+            "Artwork saved with /poster appears here automatically."
+        )
+
     elif stype == "leech":
         def enabled(key):
             return bool(
@@ -749,8 +781,8 @@ Unlock to view, add, test, remove, or export helper token data."""
             style=state_style(enabled("AUTO_THUMBNAIL")),
         )
         buttons.data_button(
-            f"Thumbnail Mode ({thumbnail_mode.title()})",
-            f"userset {user_id} thumbmode {'manual' if thumbnail_mode == 'automatic' else 'automatic'}",
+            f"Manual Thumbnails ({thumbnail_mode.title()})",
+            f"userset {user_id} thumbmanual",
         )
         buttons.data_button(
             state_label("AutoRename", enabled("AUTORENAME")),
@@ -1626,6 +1658,9 @@ async def add_file(_, message, ftype, rfunc):
     handler_dict[user_id] = False
     if ftype == "THUMBNAIL":
         des_dir = await create_thumb(message, user_id)
+    elif ftype in {"THUMBNAIL_LANDSCAPE", "THUMBNAIL_POSTER"}:
+        suffix = "landscape" if ftype == "THUMBNAIL_LANDSCAPE" else "poster"
+        des_dir = await create_thumb(message, f"{user_id}_{suffix}")
     elif ftype == "RCLONE_CONFIG":
         rpath = f"{getcwd()}/rclone/"
         await makedirs(rpath, exist_ok=True)
@@ -2271,6 +2306,8 @@ async def edit_user_settings(client, query):
 
     handler_dict[user_id] = False
     thumb_path = f"thumbnails/{user_id}.jpg"
+    landscape_thumb_path = f"thumbnails/{user_id}_landscape.jpg"
+    poster_thumb_path = f"thumbnails/{user_id}_poster.jpg"
     rclone_conf = f"rclone/{user_id}.conf"
     token_pickle = f"tokens/{user_id}.pickle"
     yt_cookie_path = f"cookies/{user_id}/cookies.txt"
@@ -2319,11 +2356,44 @@ async def edit_user_settings(client, query):
         mode = data[3] if len(data) > 3 and data[3] in {"automatic", "manual"} else "automatic"
         update_user_ldata(user_id, "THUMBNAIL_MODE", mode)
         await database.update_user_data(user_id)
-        await update_user_settings(query, "leech")
+        await update_user_settings(query, "thumbmanual")
+    elif data[2] == "thumbart":
+        action = data[3] if len(data) > 3 else ""
+        kind = data[4] if len(data) > 4 else ""
+        if kind not in {"landscape", "poster"}:
+            await query.answer("Invalid artwork type.", show_alert=True)
+            return
+        artwork_path = f"thumbnails/{user_id}_{kind}.jpg"
+        if action == "view":
+            await query.answer()
+            if await aiopath.exists(artwork_path):
+                await send_file(message, artwork_path, name)
+        elif action == "remove":
+            await query.answer("Artwork removed.", show_alert=True)
+            if await aiopath.exists(artwork_path):
+                await remove(artwork_path)
+            user_dict.pop(f"THUMBNAIL_{kind.upper()}", None)
+            await database.update_user_data(user_id)
+            await update_user_settings(query, "thumbmanual")
+        elif action == "upload":
+            await query.answer()
+            buttons = ButtonMaker()
+            buttons.data_button("Back", f"userset {user_id} thumbmanual", "footer")
+            await edit_message(
+                message,
+                f"Send the {kind} artwork as a photo. Timeout: 60 sec",
+                buttons.build_menu(1),
+            )
+            rfunc = partial(update_user_settings, query, "thumbmanual")
+            ftype = "THUMBNAIL_LANDSCAPE" if kind == "landscape" else "THUMBNAIL_POSTER"
+            pfunc = partial(add_file, ftype=ftype, rfunc=rfunc)
+            await event_handler(client, query, pfunc, rfunc, photo=True)
+        return
     elif data[2] in [
         "general",
         "mirror",
         "leech",
+        "thumbmanual",
         "userbot",
         "userbot_tokens",
         "userbot_backups",
@@ -2623,7 +2693,15 @@ async def edit_user_settings(client, query):
             for k in list(user_dict.keys()):
                 if k not in ("SUDO", "AUTH", "VERIFY_TOKEN", "VERIFY_TIME"):
                     del user_dict[k]
-            for fpath in [thumb_path, rclone_conf, token_pickle, yt_cookie_path, post_logo_path]:
+            for fpath in [
+                thumb_path,
+                landscape_thumb_path,
+                poster_thumb_path,
+                rclone_conf,
+                token_pickle,
+                yt_cookie_path,
+                post_logo_path,
+            ]:
                 if await aiopath.exists(fpath):
                     await remove(fpath)
             await update_user_settings(query)

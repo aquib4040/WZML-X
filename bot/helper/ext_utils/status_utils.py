@@ -3,7 +3,7 @@ from html import escape
 from re import findall
 from time import time
 
-from psutil import cpu_percent, disk_usage, virtual_memory
+from psutil import cpu_percent, disk_usage, net_io_counters, virtual_memory
 from pyrogram.enums import ButtonStyle
 
 from ... import (
@@ -23,6 +23,19 @@ from ..telegram_helper.button_build import ButtonMaker
 
 SIZE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"]
 GREEN_DOT = "\U0001F7E2"
+_network_sample = {"time": time(), "sent": 0, "recv": 0}
+
+
+def _network_status():
+    counters = net_io_counters()
+    now = time()
+    elapsed = max(0.001, now - _network_sample["time"])
+    sent_rate = max(0, counters.bytes_sent - _network_sample["sent"]) / elapsed
+    recv_rate = max(0, counters.bytes_recv - _network_sample["recv"]) / elapsed
+    if not _network_sample["sent"] and not _network_sample["recv"]:
+        sent_rate = recv_rate = 0
+    _network_sample.update(time=now, sent=counters.bytes_sent, recv=counters.bytes_recv)
+    return counters.bytes_sent + counters.bytes_recv, sent_rate, recv_rate
 
 
 class MirrorStatus:
@@ -268,13 +281,14 @@ def is_starfall_theme():
 def get_starfall_system_status():
     disk = disk_usage(DOWNLOAD_DIR)
     uptime = get_readable_time(time() - bot_start_time) or "0s"
-    free_percent = round(100 - disk.percent, 1)
+    total_net, tx_rate, rx_rate = _network_status()
     return (
         "◉⃝     <b>Starfall Status</b>  ◉⃝\n"
         "╔══════════════════\n"
-        f"╠ CPU ➥ {cpu_percent()}% | F ➥ {get_readable_file_size(disk.free)} "
-        f"[{free_percent}%]\n"
+        f"╠ CPU ➥ {cpu_percent()}% | F ➥ {get_readable_file_size(disk.free)}\n"
         f"╠ RAM ➥ {virtual_memory().percent}% | UP ➥ {uptime}\n"
+        f"╠ NET ➥ {get_readable_file_size(total_net)} | "
+        f"↓ {get_readable_file_size(rx_rate)}/s ↑ {get_readable_file_size(tx_rate)}/s\n"
         "╚══════════════════"
     )
 
@@ -282,11 +296,13 @@ def get_starfall_system_status():
 def get_legacy_system_status():
     disk = disk_usage(DOWNLOAD_DIR)
     uptime = get_readable_time(time() - bot_start_time) or "0s"
+    total_net, tx_rate, rx_rate = _network_status()
     return (
         "⌬ <b><u>Bot Stats</u></b>\n"
         f"┟ <b>CPU</b> → {cpu_percent()}% | <b>F</b> → "
-        f"{get_readable_file_size(disk.free)} [{round(100 - disk.percent, 1)}%]\n"
-        f"┖ <b>RAM</b> → {virtual_memory().percent}% | <b>UP</b> → {uptime}"
+        f"{get_readable_file_size(disk.free)}\n"
+        f"┠ <b>RAM</b> → {virtual_memory().percent}% | <b>UP</b> → {uptime}\n"
+        f"┖ <b>NET</b> → {get_readable_file_size(total_net)} | ↓ {get_readable_file_size(rx_rate)}/s ↑ {get_readable_file_size(tx_rate)}/s"
     )
 
 
