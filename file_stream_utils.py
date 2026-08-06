@@ -6,6 +6,35 @@ from unicodedata import normalize
 from urllib.parse import quote
 
 
+STREAM_CHUNK_SIZE = 1024 * 1024
+
+
+def parse_byte_range(value, file_size):
+    """Parse one HTTP byte range and return its inclusive start and end."""
+    if not value:
+        return None
+    if file_size <= 0 or not value.startswith("bytes="):
+        raise ValueError("invalid byte range")
+    requested = value[6:].strip()
+    if not requested or "," in requested or "-" not in requested:
+        raise ValueError("invalid byte range")
+    first, last = (part.strip() for part in requested.split("-", 1))
+    if first:
+        if not first.isdigit() or (last and not last.isdigit()):
+            raise ValueError("invalid byte range")
+        start = int(first)
+        if start >= file_size:
+            raise ValueError("unsatisfiable byte range")
+        end = min(int(last), file_size - 1) if last else file_size - 1
+        if end < start:
+            raise ValueError("unsatisfiable byte range")
+        return start, end
+    if not last.isdigit() or int(last) <= 0:
+        raise ValueError("invalid byte range")
+    suffix_length = min(int(last), file_size)
+    return file_size - suffix_length, file_size - 1
+
+
 def content_disposition(filename):
     """Return an RFC 6266 header that is safe for Starlette's Latin-1 transport."""
     filename = str(filename or "telegram-file").replace("\r", "").replace("\n", "")

@@ -27,7 +27,12 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pyrogram import Client
 from time import time
-from file_stream_utils import content_disposition, decode_file_token
+from file_stream_utils import (
+    STREAM_CHUNK_SIZE,
+    content_disposition,
+    decode_file_token,
+    parse_byte_range,
+)
 from fastapi.templating import Jinja2Templates
 from sabnzbdapi import SabnzbdClient
 from aioqbt.exc import AQError
@@ -221,14 +226,15 @@ async def _get_stream_client():
             api_hash=_API_HASH,
             bot_token=_BOT_TOKEN,
             in_memory=True,
+            max_concurrent_transmissions=8,
             no_updates=True,
         )
         await _stream_client.start()
     return _stream_client
 
 
-@app.get("/dl/{token}/{filename:path}")
-async def telegram_file_stream(token: str, filename: str):
+@app.api_route("/dl/{token}/{filename:path}", methods=["GET", "HEAD"])
+async def telegram_file_stream(token: str, filename: str, request: Request):
     payload = decode_file_token(token, time(), _BOT_TOKEN, _ACCESS_PASSWORD)
     if not payload:
         raise HTTPException(status_code=403, detail="This download link is invalid or expired")
@@ -239,21 +245,64 @@ async def telegram_file_stream(token: str, filename: str):
     if not media:
         raise HTTPException(status_code=404, detail="Telegram file not found")
 
-    async def body():
-        async for chunk in client.stream_media(message):
-            yield chunk
-
     safe_name = getattr(media, "file_name", None) or filename or "telegram-file"
+    file_size = int(getattr(media, "file_size", 0) or 0)
     headers = {
+        "Accept-Ranges": "bytes",
         "Content-Disposition": content_disposition(safe_name),
         "Cache-Control": "private, no-store",
     }
-    file_size = int(getattr(media, "file_size", 0) or 0)
-    if file_size > 0:
-        headers["Content-Length"] = str(file_size)
+    byte_range = None
+    range_header = request.headers.get("range")
+    if range_header:
+        try:
+            byte_range = parse_byte_range(range_header, file_size)
+        except ValueError:
+            headers["Content-Range"] = f"bytes */{file_size}"
+            return Response(status_code=416, headers=headers)
+
+    status_code = 200
+    if byte_range:
+        start, end = byte_range
+        content_length = end - start + 1
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        status_code = 206
+    else:
+        start, end = 0, file_size - 1
+        content_length = file_size
+    if content_length > 0:
+        headers["Content-Length"] = str(content_length)
+
+    media_type = getattr(media, "mime_type", None) or "application/octet-stream"
+    if request.method == "HEAD":
+        return Response(status_code=status_code, media_type=media_type, headers=headers)
+
+    async def body():
+        if not byte_range:
+            async for chunk in client.stream_media(message):
+                yield chunk
+            return
+
+        offset = start // STREAM_CHUNK_SIZE
+        skip = start % STREAM_CHUNK_SIZE
+        remaining = content_length
+        limit = (skip + remaining + STREAM_CHUNK_SIZE - 1) // STREAM_CHUNK_SIZE
+        async for chunk in client.stream_media(message, offset=offset, limit=limit):
+            if skip:
+                chunk = chunk[skip:]
+                skip = 0
+            if len(chunk) > remaining:
+                chunk = chunk[:remaining]
+            if chunk:
+                yield chunk
+                remaining -= len(chunk)
+            if remaining <= 0:
+                break
+
     return StreamingResponse(
         body(),
-        media_type=getattr(media, "mime_type", None) or "application/octet-stream",
+        status_code=status_code,
+        media_type=media_type,
         headers=headers,
     )
 

@@ -1,6 +1,6 @@
 from unittest import TestCase
 
-from file_stream_utils import content_disposition
+from file_stream_utils import content_disposition, parse_byte_range
 
 
 class ContentDispositionTest(TestCase):
@@ -21,3 +21,22 @@ class ContentDispositionTest(TestCase):
 
     def test_empty_filename_has_a_fallback(self):
         self.assertIn('filename="telegram-file"', content_disposition(""))
+
+
+class ByteRangeTest(TestCase):
+    def test_explicit_range(self):
+        self.assertEqual((10, 19), parse_byte_range("bytes=10-19", 100))
+
+    def test_open_ended_range(self):
+        self.assertEqual((90, 99), parse_byte_range("bytes=90-", 100))
+
+    def test_suffix_range(self):
+        self.assertEqual((90, 99), parse_byte_range("bytes=-10", 100))
+
+    def test_end_is_clamped_to_file_size(self):
+        self.assertEqual((90, 99), parse_byte_range("bytes=90-200", 100))
+
+    def test_rejects_multiple_or_unsatisfiable_ranges(self):
+        for value in ("bytes=0-1,4-5", "bytes=100-", "items=0-1", "bytes=5-4"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_byte_range(value, 100)
