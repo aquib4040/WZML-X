@@ -1,13 +1,22 @@
-from asyncio import sleep
+from asyncio import Event, TimeoutError, sleep, wait_for
 from html import escape
+from re import search
 from time import time
 
+from aiofiles.os import remove
+from aiofiles.os import path as aiopath
 from pyrogram.types import InputMediaPhoto
 
 from .. import LOGGER, user_data
 from ..helper.ext_utils.bot_utils import new_task, update_user_ldata
 from ..helper.ext_utils.db_handler import database
-from ..helper.ext_utils.media_utils import create_thumb
+from ..core.config_manager import Config
+from ..helper.ext_utils.media_utils import (
+    choose_media_title_seed,
+    create_thumb,
+    format_clean_poster_title,
+    get_video_thumbnail,
+)
 from ..helper.poster_engine import (
     POSTER_TEMPLATE_COUNT,
     render_poster_option,
@@ -78,7 +87,7 @@ def _summary(session):
     return "\n".join(lines)
 
 
-def _menu_buttons(user_id):
+def _menu_buttons(user_id, task_picker=False):
     buttons = ButtonMaker()
     buttons.data_button("Landscape", f"psel {user_id} 0 cat landscape")
     buttons.data_button("Portrait", f"psel {user_id} 0 cat portrait")
@@ -86,7 +95,11 @@ def _menu_buttons(user_id):
     buttons.data_button("Poster Styles", f"psel {user_id} 0 styles")
     buttons.data_button("Send Thumbnail", f"psel {user_id} 0 upload")
     buttons.data_button("Back", f"psel {user_id} 0 back", "footer")
-    buttons.data_button("Close", f"psel {user_id} 0 close", "footer")
+    buttons.data_button(
+        "Skip" if task_picker else "Close",
+        f"psel {user_id} 0 close",
+        "footer",
+    )
     return buttons.build_menu(2)
 
 
@@ -140,7 +153,13 @@ async def _edit_photo(message, media, caption, reply_markup):
     )
 
 
-async def start_thumbnail_picker(message, query_text, entry="poster"):
+async def start_thumbnail_picker(
+    message,
+    query_text,
+    entry="poster",
+    task_listener=None,
+    media_path=None,
+):
     query_text = str(query_text or "").strip()
     if not query_text:
         await send_message(message, "Send a title such as <code>Naruto S02</code>.")
@@ -154,11 +173,29 @@ async def start_thumbnail_picker(message, query_text, entry="poster"):
         if key[0] == user_id and now - old_session.get("created", now) > PICKER_TTL:
             POSTER_SEARCH_CACHE.pop(key, None)
     user_dict = user_data.get(user_id, {})
+    fallback_frame = ""
     try:
-        metadata = await search_poster_metadata(query_text, user_dict)
+        metadata = await search_poster_metadata(query_text, user_dict, media_path)
         if not metadata:
             await edit_message(wait, "No metadata or artwork found.")
             return None
+        artwork = metadata.setdefault("artwork", {})
+        if task_listener is not None and media_path and not artwork.get("landscape"):
+            frame = await get_video_thumbnail(media_path, None)
+            if frame:
+                fallback_frame = frame
+                artwork["landscape"] = [
+                    {
+                        "url": frame,
+                        "kind": "landscape",
+                        "source": "Video Frame Fallback",
+                        "language": None,
+                        "width": 0,
+                        "height": 0,
+                        "episode": metadata.get("episode") or "",
+                    }
+                ]
+                metadata["landscape_url"] = frame
         preview = (
             metadata.get("landscape_url")
             or metadata.get("portrait_url")
@@ -174,27 +211,129 @@ async def start_thumbnail_picker(message, query_text, entry="poster"):
             "category": "",
             "page": 0,
             "entry": entry,
+            "task_listener": task_listener,
+            "done_event": Event() if task_listener is not None else None,
             "created": time(),
             "preview": preview,
+            "fallback_frame": fallback_frame,
         }
         await delete_message(wait)
         sent = await send_message(
             message,
             _summary(session),
-            _menu_buttons(user_id),
+            _menu_buttons(user_id, task_listener is not None),
             photo=preview,
         )
         if not getattr(sent, "id", None):
             LOGGER.warning(f"Thumbnail picker delivery failed: {sent}")
             return None
+        session["message"] = sent
         POSTER_SEARCH_CACHE[(user_id, sent.id)] = session
         return sent
     except Exception as error:
         LOGGER.error(f"Thumbnail search failed: {error}", exc_info=True)
+        if fallback_frame and await aiopath.exists(fallback_frame):
+            await remove(fallback_frame)
         await edit_message(
             wait, f"Thumbnail search failed: <code>{escape(str(error)[:500])}</code>"
         )
         return None
+
+
+def _finish_task_session(session, path=None):
+    listener = session.get("task_listener")
+    if listener is not None and path:
+        listener.thumb = path
+    done_event = session.get("done_event")
+    if done_event is not None and not done_event.is_set():
+        done_event.set()
+
+
+async def open_task_thumbnail_picker(listener, media_path):
+    """Open the shared picker after download and pause this task until selection."""
+    if getattr(listener, "_manual_thumbnail_prompted", False):
+        return getattr(listener, "thumb", None)
+    listener._manual_thumbnail_prompted = True
+    raw_query = choose_media_title_seed(
+        getattr(listener, "name", ""),
+        first_file=getattr(listener, "file_details", {}).get("first_file", ""),
+        file_caption=getattr(listener, "file_details", {}).get("caption", ""),
+        custom_name=getattr(listener, "custom_name", ""),
+        link=getattr(listener, "source_url", ""),
+        merge_source_name=getattr(listener, "merge_source_name", ""),
+        prefer_filename=True,
+    )
+    rename_regex = (
+        getattr(listener, "user_dict", {}).get("lremname_regex")
+        or Config.LEECH_FILENAME_REMNAME_REGEX
+    )
+    title, season, year = format_clean_poster_title(raw_query, rename_regex)
+    episode_match = search(
+        r"(?i)(?:S\d{1,2}\s*)?(?:E|EP(?:ISODE)?)\s*0*(\d{1,4})",
+        raw_query,
+    )
+    query_parts = [title]
+    if season:
+        query_parts.append(season)
+    if episode_match:
+        query_parts.append(f"Episode {int(episode_match.group(1))}")
+    if year:
+        query_parts.append(str(year))
+    query_text = " ".join(part for part in query_parts if part).strip() or raw_query
+    sent = await start_thumbnail_picker(
+        listener.message,
+        query_text,
+        "task",
+        task_listener=listener,
+        media_path=media_path,
+    )
+    if not sent:
+        return None
+    key = (listener.user_id, sent.id)
+    session = POSTER_SEARCH_CACHE.get(key)
+    if not session:
+        return None
+    deadline = time() + PICKER_TTL
+    timed_out = False
+    while not session["done_event"].is_set():
+        if getattr(listener, "is_cancelled", False):
+            POSTER_SEARCH_CACHE.pop(key, None)
+            fallback_frame = session.get("fallback_frame")
+            if fallback_frame and await aiopath.exists(fallback_frame):
+                await remove(fallback_frame)
+            try:
+                await delete_message(sent)
+            except Exception:
+                pass
+            return None
+        remaining = deadline - time()
+        if remaining <= 0:
+            timed_out = True
+            break
+        try:
+            await wait_for(
+                session["done_event"].wait(),
+                timeout=min(2, remaining),
+            )
+        except TimeoutError:
+            continue
+    if timed_out:
+        POSTER_SEARCH_CACHE.pop(key, None)
+        try:
+            await sent.edit_caption(
+                caption="<b>Manual thumbnail selection timed out.</b> Continuing upload.",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+    fallback_frame = session.get("fallback_frame")
+    if (
+        fallback_frame
+        and fallback_frame != getattr(listener, "thumb", None)
+        and await aiopath.exists(fallback_frame)
+    ):
+        await remove(fallback_frame)
+    return getattr(listener, "thumb", None)
 
 
 @new_task
@@ -233,7 +372,29 @@ async def receive_thumbnail_upload(_, message):
     if not pending:
         return
     try:
-        path = await create_thumb(message, user_id)
+        session_key = pending.get("session_key")
+        session = POSTER_SEARCH_CACHE.get(session_key) if session_key else None
+        task_listener = session.get("task_listener") if session else None
+        thumb_id = (
+            f"task_{task_listener.mid}"
+            if task_listener is not None
+            else user_id
+        )
+        path = await create_thumb(message, thumb_id)
+        if task_listener is not None:
+            _finish_task_session(session, path)
+            POSTER_SEARCH_CACHE.pop(session_key, None)
+            picker_message = session.get("message")
+            if picker_message:
+                try:
+                    await picker_message.edit_caption(
+                        caption="<b>Custom thumbnail selected for this task.</b>",
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+            await send_message(message, "<b>Custom thumbnail selected for this task.</b>")
+            return
         update_user_ldata(user_id, "THUMBNAIL", path)
         update_user_ldata(user_id, "THUMBNAIL_MODE", "manual")
         await database.update_user_doc(user_id, "THUMBNAIL", path)
@@ -257,6 +418,8 @@ async def poster_select(_, query):
     action = data[3]
     if action == "close":
         await query.answer()
+        if session:
+            _finish_task_session(session)
         POSTER_SEARCH_CACHE.pop((user_id, query.message.id), None)
         await delete_message(query.message)
         return
@@ -276,7 +439,7 @@ async def poster_select(_, query):
                 query.message,
                 session["preview"],
                 _summary(session),
-                _menu_buttons(user_id),
+                _menu_buttons(user_id, session.get("task_listener") is not None),
             )
         elif action == "cat":
             category = data[4] if len(data) > 4 else ""
@@ -314,7 +477,24 @@ async def poster_select(_, query):
                 await query.answer("Artwork selection expired.", show_alert=True)
                 return
             kind = "poster" if category == "portrait" else "landscape"
-            path = await save_artwork_url(items[page]["url"], user_id, kind)
+            task_listener = session.get("task_listener")
+            if task_listener is not None:
+                if items[page].get("source") == "Video Frame Fallback":
+                    path = items[page]["url"]
+                else:
+                    path = await save_artwork_url(
+                        items[page]["url"],
+                        f"task_{task_listener.mid}",
+                        kind,
+                    )
+                _finish_task_session(session, path)
+                await query.answer("Thumbnail selected for this task.", show_alert=True)
+                await query.message.edit_caption(
+                    caption="<b>Manual thumbnail selected for this task.</b>",
+                    reply_markup=None,
+                )
+                POSTER_SEARCH_CACHE.pop((user_id, query.message.id), None)
+                return
             storage_key = f"THUMBNAIL_{kind.upper()}"
             update_user_ldata(user_id, storage_key, path)
             update_user_ldata(user_id, "THUMBNAIL_MODE", "manual")
@@ -338,9 +518,26 @@ async def poster_select(_, query):
             style = data[4] if len(data) > 4 else "1"
             if style not in {str(value) for value in range(1, POSTER_TEMPLATE_COUNT + 1)}:
                 style = "1"
+            task_listener = session.get("task_listener")
             path = await render_poster_option(
-                metadata, user_id, user_dict, style, save_thumbnail=True
+                metadata,
+                user_id,
+                user_dict,
+                style,
+                save_thumbnail=task_listener is None,
             )
+            if task_listener is not None:
+                _finish_task_session(session, path)
+                await query.answer(
+                    f"Poster style {style} selected for this task.",
+                    show_alert=True,
+                )
+                await query.message.edit_caption(
+                    caption=f"<b>Poster style {style} selected for this task.</b>",
+                    reply_markup=None,
+                )
+                POSTER_SEARCH_CACHE.pop((user_id, query.message.id), None)
+                return
             update_user_ldata(user_id, "THUMBNAIL", path)
             update_user_ldata(user_id, "THUMBNAIL_MODE", "manual")
             await database.update_user_doc(user_id, "THUMBNAIL", path)
@@ -356,6 +553,7 @@ async def poster_select(_, query):
             PENDING_THUMB_UPLOADS[user_id] = {
                 "chat_id": query.message.chat.id,
                 "created": created,
+                "session_key": (user_id, query.message.id),
             }
             await _expire_upload(user_id, created)
             await query.answer("Send a photo or image document within 60 seconds.", show_alert=True)

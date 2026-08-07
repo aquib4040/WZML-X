@@ -79,7 +79,7 @@ class TelegramDownloadHelper:
     async def _on_download_complete(self):
         await self._listener.on_download_complete()
         async with global_lock:
-            GLOBAL_GID.pop(self._id)
+            GLOBAL_GID.pop(self._id, None)
         return
 
     async def _download(self, message, path):

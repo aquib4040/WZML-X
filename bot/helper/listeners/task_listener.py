@@ -424,6 +424,25 @@ class TaskListener(TaskConfig):
                 0
             ] or "application/octet-stream"
 
+        thumbnail_mode = str(
+            self.user_dict.get("THUMBNAIL_MODE", Config.THUMBNAIL_MODE)
+            or "automatic"
+        ).lower()
+        if (
+            self.is_leech
+            and thumbnail_mode == "manual"
+            and not self.thumb
+            and not getattr(self, "rss_auto_leech", False)
+            and not self.is_cancelled
+        ):
+            manual_media_path = await _first_video_path(up_path)
+            if manual_media_path:
+                from ...modules.poster_search import open_task_thumbnail_picker
+
+                await open_task_thumbnail_picker(self, manual_media_path)
+                if self.is_cancelled:
+                    return
+
         if self.name_swap:
             up_path = await self.substitute(up_path)
             if self.is_cancelled:
@@ -538,7 +557,7 @@ class TaskListener(TaskConfig):
                         "AUTO_POSTER_USE_AS_THUMBNAIL",
                         Config.AUTO_POSTER_USE_AS_THUMBNAIL,
                     )
-                    if _poster_bool(use_poster_thumb, True):
+                    if _poster_bool(use_poster_thumb, True) and not self.thumb:
                         self.thumb = poster_payload.get("path") or self.thumb
             except Exception as e:
                 LOGGER.warning(f"Auto poster generation failed: {e}", exc_info=True)

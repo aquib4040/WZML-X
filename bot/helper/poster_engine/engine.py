@@ -1410,9 +1410,9 @@ def _render_template(style, bg, side, data, logo=None):
     return renderers.get(style, _template_one)(bg, side, data, logo)
 
 
-async def search_poster_metadata(query, user_dict=None):
+async def search_poster_metadata(query, user_dict=None, filepath=None):
     query = _safe_text(query)
-    return await _metadata(query, None, user_dict or {})
+    return await _metadata(query, filepath, user_dict or {})
 
 
 async def render_poster_option(metadata, user_id, user_dict=None, option="1", save_thumbnail=False):

@@ -2570,6 +2570,13 @@ def _final_clean(title):
 
 def _strip_poster_search_prefix(title):
     title = str(title or "")
+    title = re.sub(
+        r"^\s*(?:www[\s._-]+)?1Tamil(?:MV|Blasters)"
+        r"(?:[\s._-]+[A-Za-z]{2,12})?[\s._-]+",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
     # Unbracketed channel handles sometimes use underscores as the only
     # separator before a title. Stop at the first TitleCase word so the
     # handle cannot consume the complete filename.
@@ -2591,6 +2598,12 @@ def _strip_poster_search_prefix(title):
         flags=re.IGNORECASE,
     )
     uploader_pattern = "|".join(re.escape(tag) for tag in UPLOADER_TAGS)
+    title = re.sub(
+        rf"^\s*(?:{uploader_pattern})[\s._-]+",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
     title = re.sub(
         rf"^\s*\[(?:{uploader_pattern})\]\s*[-_. ]*",
         "",
@@ -2939,6 +2952,11 @@ async def get_tmdb_poster_link(title, year=None, as_doc=False, season=None, epis
                                             "https://image.tmdb.org/t/p/original"
                                             f"{preferred['still_path']}"
                                         )
+                                LOGGER.info(
+                                    "TMDb season artwork unavailable for Season %s; "
+                                    "falling back to series artwork",
+                                    season_no,
+                                )
 
                             images_url = (
                                 f"https://api.themoviedb.org/3"
@@ -3138,10 +3156,18 @@ async def get_anime_landscape_thumbnail(video_file, raw_filename, duration=None,
     if not force and not _looks_like_anime_name(raw_filename, title):
         return None
 
-    poster_url = (
-        await get_tmdb_poster_link(title, year, False, season, episode)
-        or await get_anilist_poster_link(title, as_doc=False)
-    )
+    if season:
+        poster_url = (
+            await get_tmdb_poster_link(title, year, False, season, episode)
+            or await get_anilist_poster_link(title, as_doc=False)
+        )
+    else:
+        # Preserve the original anime lookup order unless season-specific TMDb
+        # artwork was explicitly requested.
+        poster_url = (
+            await get_anilist_poster_link(title, as_doc=False)
+            or await get_tmdb_poster_link(title, year, False)
+        )
     if poster_url:
         thumb = await download_image_thumb(poster_url, landscape=True)
         if thumb:
