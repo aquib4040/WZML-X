@@ -2525,7 +2525,7 @@ def clean_autorename_separators(filename):
         return key
 
     stem = re.sub(r"(?<=\d)\.(?=\d)", protect, stem)
-    stem = re.sub(r"[._-]+", " ", stem)
+    stem = re.sub(r"[.-]+", " ", stem)
     for key, value in decimals.items():
         stem = stem.replace(key, value)
     stem = re.sub(r"\s+", " ", stem).strip()
@@ -2826,7 +2826,7 @@ def format_clean_poster_title(raw_title, rename_regex=None):
     return _final_clean(title), None, None
 
 
-async def get_tmdb_poster_link(title, year=None, as_doc=False):
+async def get_tmdb_poster_link(title, year=None, as_doc=False, season=None, episode=None):
     """Fetch a poster/backdrop URL from TMDb with one live HTTP client."""
     access_token = Config.TMDB_ACCESS_TOKEN
     if not access_token:
@@ -2899,6 +2899,46 @@ async def get_tmdb_poster_link(title, year=None, as_doc=False):
                                     f"TMDb result is a person, skipping: {result_name}"
                                 )
                                 return None
+
+                            season_match = re.search(r"\d+", str(season or ""))
+                            if media_type == "tv" and season_match:
+                                season_no = int(season_match.group())
+                                season_resp = await client.get(
+                                    f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_no}",
+                                    params={"language": "en-US"},
+                                    headers=headers,
+                                )
+                                if season_resp.status_code == 200:
+                                    season_data = season_resp.json()
+                                    if as_doc and season_data.get("poster_path"):
+                                        return (
+                                            "https://image.tmdb.org/t/p/original"
+                                            f"{season_data['poster_path']}"
+                                        )
+                                    episodes = season_data.get("episodes", [])
+                                    episode_match = re.search(r"\d+", str(episode or ""))
+                                    episode_no = int(episode_match.group()) if episode_match else None
+                                    preferred = next(
+                                        (
+                                            value
+                                            for value in episodes
+                                            if episode_no is not None
+                                            and value.get("episode_number") == episode_no
+                                            and value.get("still_path")
+                                        ),
+                                        None,
+                                    )
+                                    if preferred is None:
+                                        preferred = max(
+                                            (value for value in episodes if value.get("still_path")),
+                                            key=lambda value: float(value.get("vote_average") or 0),
+                                            default=None,
+                                        )
+                                    if preferred:
+                                        return (
+                                            "https://image.tmdb.org/t/p/original"
+                                            f"{preferred['still_path']}"
+                                        )
 
                             images_url = (
                                 f"https://api.themoviedb.org/3"
@@ -3025,6 +3065,11 @@ async def get_final_poster_url(raw_filename, as_doc=False, rename_regex=None):
     Returns the poster URL string or None.
     """
     title, season, year = format_clean_poster_title(raw_filename, rename_regex)
+    episode_match = re.search(
+        r"(?i)(?:S\d{1,2}\s*)?(?:E|EP(?:ISODE)?)\s*0*(\d{1,4})",
+        str(raw_filename or ""),
+    )
+    episode = episode_match.group(1) if episode_match else None
     # Guard: skip TMDb search if title is empty or too short
     if not title or len(title.strip()) < 2:
         LOGGER.info(f"Title too short for TMDb search: '{title}'")
@@ -3037,6 +3082,7 @@ async def get_final_poster_url(raw_filename, as_doc=False, rename_regex=None):
 
     cache_key = (
         f"poster:{title.lower()}:{str(year or '')}:"
+        f"{str(season or '')}:{str(episode or '')}:"
         f"{'doc' if as_doc else 'media'}"
     )
     if cache_key in _metadata_cache:
@@ -3044,7 +3090,7 @@ async def get_final_poster_url(raw_filename, as_doc=False, rename_regex=None):
         LOGGER.info(f"Poster found via cached {provider}")
         return cached_url
 
-    poster_url = await get_tmdb_poster_link(title, year, as_doc)
+    poster_url = await get_tmdb_poster_link(title, year, as_doc, season, episode)
     if poster_url:
         LOGGER.info("Poster found via TMDb API")
         _metadata_cache[cache_key] = (poster_url, "TMDb")
@@ -3066,23 +3112,35 @@ async def get_final_poster_url(raw_filename, as_doc=False, rename_regex=None):
 
 
 async def get_landscape_provider_thumbnail_url(raw_filename, rename_regex=None):
-    title, _, year = format_clean_poster_title(raw_filename, rename_regex)
+    title, season, year = format_clean_poster_title(raw_filename, rename_regex)
+    episode_match = re.search(
+        r"(?i)(?:S\d{1,2}\s*)?(?:E|EP(?:ISODE)?)\s*0*(\d{1,4})",
+        str(raw_filename or ""),
+    )
+    episode = episode_match.group(1) if episode_match else None
     if not title or len(title.strip()) < 2 or is_hash_like_title(title):
         return None
-    tmdb_url = await get_tmdb_poster_link(title, year, as_doc=False)
+    tmdb_url = await get_tmdb_poster_link(
+        title, year, as_doc=False, season=season, episode=episode
+    )
     if tmdb_url:
         return tmdb_url
     return await get_anilist_poster_link(title, as_doc=False)
 
 
 async def get_anime_landscape_thumbnail(video_file, raw_filename, duration=None, rename_regex=None, force=False):
-    title, _, _ = format_clean_poster_title(raw_filename, rename_regex)
+    title, season, year = format_clean_poster_title(raw_filename, rename_regex)
+    episode_match = re.search(
+        r"(?i)(?:S\d{1,2}\s*)?(?:E|EP(?:ISODE)?)\s*0*(\d{1,4})",
+        str(raw_filename or ""),
+    )
+    episode = episode_match.group(1) if episode_match else None
     if not force and not _looks_like_anime_name(raw_filename, title):
         return None
 
     poster_url = (
-        await get_anilist_poster_link(title, as_doc=False)
-        or await get_tmdb_poster_link(title, as_doc=False)
+        await get_tmdb_poster_link(title, year, False, season, episode)
+        or await get_anilist_poster_link(title, as_doc=False)
     )
     if poster_url:
         thumb = await download_image_thumb(poster_url, landscape=True)

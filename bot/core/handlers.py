@@ -347,6 +347,14 @@ def add_handlers():
     )
     TgClient.bot.add_handler(
         MessageHandler(
+            receive_thumbnail_upload,
+            filters=create(pending_thumbnail_upload_filter)
+            & CustomFilters.authorized_uset,
+        ),
+        group=-1,
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
             file_link,
             filters=command(BotCommands.LinkCommand, case_sensitive=True)
             & CustomFilters.authorized,

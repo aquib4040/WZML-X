@@ -20,6 +20,7 @@ from ..ext_utils.media_utils import (
     build_caption_metadata,
     choose_media_title_seed,
     extract_metadata_from_filename,
+    format_clean_poster_title,
     get_final_poster_url,
     get_video_thumbnail,
 )
@@ -473,7 +474,39 @@ def _tmdb_url(path, size="w1280"):
     return TMDB_IMAGE.format(size=size, path=path) if path else ""
 
 
-async def _tmdb_search(title, year=None):
+def _number(value):
+    match = search(r"\d+", _safe_text(value))
+    return int(match.group()) if match else None
+
+
+def _artwork_item(item, kind, source="TMDb", season=None, episode=None):
+    path = item.get("file_path") or item.get("still_path") or item.get("poster_path")
+    if not path:
+        return None
+    return {
+        "url": _tmdb_url(path, "original"),
+        "kind": kind,
+        "source": source,
+        "language": item.get("iso_639_1"),
+        "width": item.get("width") or 0,
+        "height": item.get("height") or 0,
+        "vote": float(item.get("vote_average") or 0),
+        "season": season,
+        "episode": episode,
+    }
+
+
+def _dedupe_artwork(items):
+    result, seen = [], set()
+    for item in items:
+        if not item or not item.get("url") or item["url"] in seen:
+            continue
+        seen.add(item["url"])
+        result.append(item)
+    return result
+
+
+async def _tmdb_search(title, year=None, season=None, episode=None):
     if not title or not Config.TMDB_ACCESS_TOKEN:
         return {}
     headers = {
@@ -524,17 +557,122 @@ async def _tmdb_search(title, year=None):
         if result_score(item) < 0.5:
             return {}
         media_type = item.get("media_type") or "movie"
-        details = {}
+        details, image_data, season_data, season_images = {}, {}, {}, {}
+        tmdb_id = item.get("id")
         try:
             async with AsyncClient(timeout=12, headers=headers) as client:
                 detail_res = await client.get(
-                    f"https://api.themoviedb.org/3/{media_type}/{item.get('id')}",
+                    f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
                     params={"language": "en-US"},
                 )
+                image_res = await client.get(
+                    f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/images",
+                    params={"include_image_languages": "en,null"},
+                )
+                season_no = _number(season)
+                if media_type == "tv" and season_no is not None:
+                    season_res = await client.get(
+                        f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_no}",
+                        params={"language": "en-US"},
+                    )
+                    season_image_res = await client.get(
+                        f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_no}/images",
+                        params={"include_image_languages": "en,null"},
+                    )
             if detail_res.status_code == 200:
                 details = detail_res.json()
+            if image_res.status_code == 200:
+                image_data = image_res.json()
+            if media_type == "tv" and season_no is not None:
+                if season_res.status_code == 200:
+                    season_data = season_res.json()
+                if season_image_res.status_code == 200:
+                    season_images = season_image_res.json()
         except Exception:
-            details = {}
+            pass
+        season_no = _number(season)
+        episode_no = _number(episode)
+        backdrops = image_data.get("backdrops", [])
+        posters = image_data.get("posters", [])
+        english_landscape = [
+            _artwork_item(value, "landscape")
+            for value in backdrops
+            if value.get("iso_639_1") == "en"
+        ]
+        clean_landscape = [
+            _artwork_item(value, "clean")
+            for value in backdrops
+            if value.get("iso_639_1") is None
+        ]
+        other_landscape = [
+            _artwork_item(value, "landscape")
+            for value in backdrops
+            if value.get("iso_639_1") not in {"en", None}
+        ]
+        portrait = [
+            _artwork_item(value, "portrait")
+            for value in sorted(
+                posters,
+                key=lambda value: (
+                    value.get("iso_639_1") == "en",
+                    value.get("iso_639_1") is None,
+                    float(value.get("vote_average") or 0),
+                ),
+                reverse=True,
+            )
+        ]
+        season_posters = [
+            _artwork_item(value, "portrait", "TMDb Season", season_no)
+            for value in season_images.get("posters", [])
+        ]
+        if season_data.get("poster_path"):
+            season_posters.insert(
+                0,
+                _artwork_item(season_data, "portrait", "TMDb Season", season_no),
+            )
+        season_stills = []
+        for ep in season_data.get("episodes", []):
+            art = _artwork_item(
+                ep,
+                "landscape",
+                "TMDb Episode Still",
+                season_no,
+                ep.get("episode_number"),
+            )
+            if art:
+                season_stills.append(art)
+        season_stills.sort(
+            key=lambda value: (
+                episode_no is not None and value.get("episode") == episode_no,
+                value.get("vote", 0),
+            ),
+            reverse=True,
+        )
+        landscape_items = _dedupe_artwork(
+            season_stills + english_landscape + other_landscape
+        )
+        clean_items = _dedupe_artwork(clean_landscape)
+        portrait_items = _dedupe_artwork(season_posters + portrait)
+        fallback_landscape = _artwork_item(
+            {"file_path": item.get("backdrop_path")}, "landscape"
+        )
+        fallback_portrait = _artwork_item(
+            {"file_path": item.get("poster_path")}, "portrait"
+        )
+        clean_urls = {value["url"] for value in clean_items}
+        fallback_landscape_items = (
+            [fallback_landscape]
+            if fallback_landscape
+            and fallback_landscape["url"] not in clean_urls
+            else []
+        )
+        landscape_items = _dedupe_artwork(
+            landscape_items + fallback_landscape_items
+        )
+        landscape_items = [
+            value for value in landscape_items if value["url"] not in clean_urls
+        ]
+        portrait_items = _dedupe_artwork(portrait_items + [fallback_portrait])
         genres = ", ".join(g.get("name", "") for g in details.get("genres", []) if g.get("name"))
         studio = ""
         if companies := details.get("production_companies"):
@@ -552,9 +690,16 @@ async def _tmdb_search(title, year=None):
             "genres": genres,
             "studio": studio,
             "first_aired": details.get("first_air_date") or details.get("release_date") or "",
-            "landscape_url": _tmdb_url(item.get("backdrop_path"), "w1280"),
-            "portrait_url": _tmdb_url(item.get("poster_path"), "w780"),
-            "poster_url": _tmdb_url(item.get("poster_path"), "w780"),
+            "season": f"Season {season_no}" if season_no is not None else "",
+            "episode": str(episode_no or ""),
+            "landscape_url": (landscape_items[0]["url"] if landscape_items else ""),
+            "portrait_url": (portrait_items[0]["url"] if portrait_items else ""),
+            "poster_url": (portrait_items[0]["url"] if portrait_items else ""),
+            "artwork": {
+                "landscape": landscape_items[:80],
+                "portrait": portrait_items[:80],
+                "clean": clean_items[:80],
+            },
         }
     except Exception as err:
         LOGGER.warning(f"TMDb poster search failed for '{title}': {err}")
@@ -725,44 +870,90 @@ async def _metadata(
         merge_source_name=merge_source_name,
     )
     base = dict(caption_data)
-    title = _clean_search_title(seed, base.get("title") or "")
+    parsed_title, parsed_season, parsed_year = format_clean_poster_title(seed)
+    season_match = search(
+        r"(?i)(?:\bS(?:eason)?\s*0*(\d{1,2})\b|\bS0*(\d{1,2})(?=E\d))",
+        seed,
+    )
+    episode_match = search(
+        r"(?i)(?:\bS\d{1,2}\s*E\s*0*(\d{1,4})\b|\b(?:E|EP(?:ISODE)?)\s*0*(\d{1,4})\b)",
+        seed,
+    )
+    season_no = next(
+        (group for group in (season_match.groups() if season_match else ()) if group),
+        None,
+    )
+    episode_no = next(
+        (group for group in (episode_match.groups() if episode_match else ()) if group),
+        None,
+    )
+    season = parsed_season or (f"Season {int(season_no)}" if season_no else "")
+    episode = str(int(episode_no)) if episode_no else ""
+    year = base.get("year") or parsed_year or ""
+    title = _clean_search_title(parsed_title or seed, base.get("title") or "")
     if not title or title.lower() == "unknown":
         title = _clean_search_title(seed)
     anime_hint = _looks_like_anime_name(seed, title)
 
-    cache_key = (title.casefold(), str(base.get("year") or ""), anime_hint)
+    cache_key = (title.casefold(), str(year), str(season), str(episode), anime_hint)
     cached = _PROVIDER_CACHE.get(cache_key)
     provider = dict(cached[1]) if cached and cached[0] > time() else {}
     cache_hit = bool(provider)
     if not provider:
-        if anime_hint:
+        if season:
+            provider = await _tmdb_search(title, year, season, episode)
+        if not provider and anime_hint:
             provider = await _anime_search(title)
         if not provider:
-            provider = await _tmdb_search(title, base.get("year"))
+            provider = await _tmdb_search(title, year, season, episode)
         if not provider:
             provider = await _anime_search(title)
 
     imdb = {} if cache_hit else await _imdb_search(
         provider.get("title") or title,
-        provider.get("year") or base.get("year"),
+        provider.get("year") or year,
     )
-    if not _imdb_matches(provider or {"title": title, "year": base.get("year")}, imdb):
+    if not _imdb_matches(provider or {"title": title, "year": year}, imdb):
         imdb = {}
 
-    # AniList is the preferred anime artwork provider. When it lacks one of the
-    # two aspect ratios, supplement only the missing art from a validated TMDb
-    # result, then use IMDb portrait art as the final provider fallback.
-    if provider.get("provider") == "AniList" and (
-        not provider.get("landscape_url") or not provider.get("portrait_url")
-    ):
+    # Keep AniList metadata for anime, but enrich the picker with TMDb's larger
+    # categorized artwork collection when both providers identify the same title.
+    if provider.get("provider") == "AniList":
         tmdb_art = await _tmdb_search(
             provider.get("title") or title,
-            provider.get("year") or base.get("year"),
+            provider.get("year") or year,
+            season,
+            episode,
         )
         if _imdb_matches(provider, tmdb_art):
             for key in ("landscape_url", "portrait_url", "poster_url"):
                 if not provider.get(key) and tmdb_art.get(key):
                     provider[key] = tmdb_art[key]
+            provider_artwork = tmdb_art.get("artwork") or {}
+            provider["artwork"] = {
+                key: list(provider_artwork.get(key) or [])
+                for key in ("landscape", "portrait", "clean")
+            }
+            for key, url in (
+                ("landscape", provider.get("landscape_url")),
+                ("portrait", provider.get("portrait_url")),
+            ):
+                if url:
+                    provider["artwork"][key] = _dedupe_artwork(
+                        provider["artwork"][key]
+                        + [
+                            {
+                                "url": url,
+                                "kind": key,
+                                "source": "AniList",
+                                "language": None,
+                                "width": 0,
+                                "height": 0,
+                                "season": _number(season),
+                                "episode": _number(episode),
+                            }
+                        ]
+                    )
     if imdb and not provider:
         provider = dict(imdb)
     if imdb:
@@ -786,9 +977,9 @@ async def _metadata(
         "brand": _cfg(user_dict, "POST_BRAND_NAME", "Anime Starfall") or "Anime Starfall",
         "title": title,
         "name": title,
-        "year": base.get("year", ""),
-        "season": base.get("season", ""),
-        "episode": base.get("episode", ""),
+        "year": year,
+        "season": season,
+        "episode": episode,
         "episodes": base.get("episodes") or base.get("episode", ""),
         "range": base.get("range", ""),
         "start": base.get("start", ""),
@@ -857,6 +1048,37 @@ async def _metadata(
         not data.get("episodes") or data.get("episodes") == data.get("episode")
     ):
         data["episodes"] = data["range"].removeprefix("EP(").removesuffix(")")
+    artwork = data.get("artwork") if isinstance(data.get("artwork"), dict) else {}
+    artwork.setdefault("landscape", [])
+    artwork.setdefault("portrait", [])
+    artwork.setdefault("clean", [])
+    if data.get("landscape_url") and not artwork["landscape"]:
+        artwork["landscape"] = [
+            {
+                "url": data["landscape_url"],
+                "kind": "landscape",
+                "source": data.get("provider") or "Provider",
+                "language": None,
+                "width": 0,
+                "height": 0,
+                "season": _number(data.get("season")),
+                "episode": _number(data.get("episode")),
+            }
+        ]
+    if data.get("portrait_url") and not artwork["portrait"]:
+        artwork["portrait"] = [
+            {
+                "url": data["portrait_url"],
+                "kind": "portrait",
+                "source": data.get("provider") or "Provider",
+                "language": None,
+                "width": 0,
+                "height": 0,
+                "season": _number(data.get("season")),
+                "episode": _number(data.get("episode")),
+            }
+        ]
+    data["artwork"] = artwork
     return data
 
 
@@ -1223,6 +1445,18 @@ async def save_poster_artwork(metadata, user_id, kind):
         image = await _download_image(alternate)
     if image is None:
         raise ValueError(f"No {kind} artwork is available for this result.")
+    await makedirs("thumbnails", exist_ok=True)
+    path = ospath.join("thumbnails", f"{user_id}_{kind}.jpg")
+    await sync_to_async(image.save, path, "JPEG", quality=95, optimize=True)
+    return path
+
+
+async def save_artwork_url(url, user_id, kind):
+    """Save an explicitly selected provider image into a manual artwork slot."""
+    kind = "poster" if kind == "poster" else "landscape"
+    image = await _download_image(url)
+    if image is None:
+        raise ValueError("The selected artwork could not be downloaded.")
     await makedirs("thumbnails", exist_ok=True)
     path = ospath.join("thumbnails", f"{user_id}_{kind}.jpg")
     await sync_to_async(image.save, path, "JPEG", quality=95, optimize=True)

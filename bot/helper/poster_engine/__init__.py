@@ -5,6 +5,7 @@ from .engine import (
     is_auto_poster_enabled,
     render_poster_option,
     save_poster_artwork,
+    save_artwork_url,
     search_poster_metadata,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "is_auto_poster_enabled",
     "render_poster_option",
     "save_poster_artwork",
+    "save_artwork_url",
     "search_poster_metadata",
 ]

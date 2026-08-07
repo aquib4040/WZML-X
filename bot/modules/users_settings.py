@@ -653,15 +653,17 @@ Unlock to view, add, test, remove, or export helper token data."""
             f"Mode: {mode.title()}",
             f"userset {user_id} thumbmode {'manual' if mode != 'manual' else 'automatic'}",
         )
+        buttons.data_button("Search Thumbnail", f"userset {user_id} thumbsearch")
         for label, kind, exists in (
             ("Landscape", "landscape", land_exists),
             ("Portrait Poster", "poster", poster_exists),
+            ("Generic Fallback", "generic", generic_exists),
         ):
             buttons.data_button(f"Upload {label}", f"userset {user_id} thumbart upload {kind}")
             if exists:
                 buttons.data_button(f"View {label}", f"userset {user_id} thumbart view {kind}")
                 buttons.data_button(f"Remove {label}", f"userset {user_id} thumbart remove {kind}")
-        buttons.data_button("Back", f"userset {user_id} leech", "footer")
+        buttons.data_button("Back", f"userset {user_id} leech_thumbs", "footer")
         buttons.data_button("Close", f"userset {user_id} close", "footer")
         btns = buttons.build_menu(2)
         text = (
@@ -673,7 +675,13 @@ Unlock to view, add, test, remove, or export helper token data."""
             "Artwork saved with /poster appears here automatically."
         )
 
-    elif stype == "leech":
+    elif stype in {
+        "leech",
+        "leech_upload",
+        "leech_thumbs",
+        "leech_naming",
+        "leech_process",
+    }:
         def enabled(key):
             return bool(
                 user_dict.get(key, False)
@@ -751,59 +759,72 @@ Unlock to view, add, test, remove, or export helper token data."""
             TgClient.MAX_SPLIT_SIZE if premium_upload_enabled else 2097152000
         )
 
-        buttons.data_button("Thumbnail", f"userset {user_id} menu THUMBNAIL")
-        buttons.data_button("Leech Split Size", f"userset {user_id} menu LEECH_SPLIT_SIZE")
-        buttons.data_button("Leech Destination", f"userset {user_id} menu LEECH_DUMP_CHAT")
-        buttons.data_button("Leech Prefix", f"userset {user_id} menu LEECH_PREFIX")
-        buttons.data_button("Leech Suffix", f"userset {user_id} menu LEECH_SUFFIX")
-        buttons.data_button("Leech Caption", f"userset {user_id} menu LEECH_CAPTION")
-        buttons.data_button("Caption Replace", f"userset {user_id} menu CAPTION_WORD_REPLACE")
-        buttons.data_button("Thumbnail Layout", f"userset {user_id} menu THUMBNAIL_LAYOUT")
-        buttons.data_button(
-            state_label("Send As Document", enabled("AS_DOCUMENT")),
-            f"userset {user_id} tog AS_DOCUMENT {'f' if enabled('AS_DOCUMENT') else 't'}",
-            style=state_style(enabled("AS_DOCUMENT")),
-        )
-        if TgClient.IS_PREMIUM_USER:
+        if stype == "leech":
+            buttons.data_button("Upload Mode", f"userset {user_id} leech_upload")
+            buttons.data_button("Thumbnails", f"userset {user_id} leech_thumbs")
+            buttons.data_button("Naming & Captions", f"userset {user_id} leech_naming")
+            buttons.data_button("Completion & Processing", f"userset {user_id} leech_process")
+            buttons.data_button("Back", f"userset {user_id} back", "footer")
+        elif stype == "leech_upload":
+            buttons.data_button("Leech Split Size", f"userset {user_id} menu LEECH_SPLIT_SIZE")
+            buttons.data_button("Leech Destination", f"userset {user_id} menu LEECH_DUMP_CHAT")
             buttons.data_button(
-                state_label("Leech by User" if user_upload else "Leech by Bot", user_upload),
-                f"userset {user_id} tog USER_TRANSMISSION {'f' if user_upload else 't'}",
-                style=state_style(user_upload),
+                state_label("Send As Document", enabled("AS_DOCUMENT")),
+                f"userset {user_id} tog AS_DOCUMENT {'f' if enabled('AS_DOCUMENT') else 't'}",
+                style=state_style(enabled("AS_DOCUMENT")),
+            )
+            if TgClient.IS_PREMIUM_USER:
+                buttons.data_button(
+                    state_label("Leech by User" if user_upload else "Leech by Bot", user_upload),
+                    f"userset {user_id} tog USER_TRANSMISSION {'f' if user_upload else 't'}",
+                    style=state_style(user_upload),
+                )
+                buttons.data_button(
+                    state_label("Hybrid Leech", hybrid_upload),
+                    f"userset {user_id} tog HYBRID_LEECH {'f' if hybrid_upload else 't'}",
+                    style=state_style(hybrid_upload),
+                )
+            buttons.data_button("Back", f"userset {user_id} leech", "footer")
+        elif stype == "leech_thumbs":
+            buttons.data_button("Custom Thumbnail", f"userset {user_id} menu THUMBNAIL")
+            buttons.data_button("Thumbnail Layout", f"userset {user_id} menu THUMBNAIL_LAYOUT")
+            buttons.data_button(
+                state_label("Auto Thumbnail", enabled("AUTO_THUMBNAIL")),
+                f"userset {user_id} tog AUTO_THUMBNAIL {'f' if enabled('AUTO_THUMBNAIL') else 't'}",
+                style=state_style(enabled("AUTO_THUMBNAIL")),
             )
             buttons.data_button(
-                state_label("Hybrid Leech", hybrid_upload),
-                f"userset {user_id} tog HYBRID_LEECH {'f' if hybrid_upload else 't'}",
-                style=state_style(hybrid_upload),
+                f"Manual Thumbnails ({thumbnail_mode.title()})",
+                f"userset {user_id} thumbmanual",
             )
-        buttons.data_button(
-            state_label("Auto Thumbnail", enabled("AUTO_THUMBNAIL")),
-            f"userset {user_id} tog AUTO_THUMBNAIL {'f' if enabled('AUTO_THUMBNAIL') else 't'}",
-            style=state_style(enabled("AUTO_THUMBNAIL")),
-        )
-        buttons.data_button(
-            f"Manual Thumbnails ({thumbnail_mode.title()})",
-            f"userset {user_id} thumbmanual",
-        )
-        buttons.data_button(
-            state_label("AutoRename", enabled("AUTORENAME")),
-            f"userset {user_id} tog AUTORENAME {'f' if enabled('AUTORENAME') else 't'}",
-            style=state_style(enabled("AUTORENAME")),
-        )
-        buttons.data_button("AutoRename Template", f"userset {user_id} menu lremname_auto")
-        buttons.data_button(
-            state_label("Complete Msg", enabled("LEECH_COMPLETE_MSG")),
-            f"userset {user_id} tog LEECH_COMPLETE_MSG {'f' if enabled('LEECH_COMPLETE_MSG') else 't'}",
-            style=state_style(enabled("LEECH_COMPLETE_MSG")),
-        )
-        buttons.data_button(
-            state_label("Sequential Leech", enabled("SEQUENTIAL_LEECH")),
-            f"userset {user_id} tog SEQUENTIAL_LEECH {'f' if enabled('SEQUENTIAL_LEECH') else 't'}",
-            style=state_style(enabled("SEQUENTIAL_LEECH")),
-        )
-        buttons.data_button(f"Caption Font ({font_label})", f"userset {user_id} font")
-        buttons.data_button("Subtitle Target", f"userset {user_id} menu SUBTITLE_TRANSLATE_TARGET")
-        buttons.data_button("Intro Subtitle", f"userset {user_id} menu INTRO_SUBTITLE_TEXT")
-        buttons.data_button("Back", f"userset {user_id} back", "footer")
+            buttons.data_button("Back", f"userset {user_id} leech", "footer")
+        elif stype == "leech_naming":
+            buttons.data_button("Leech Prefix", f"userset {user_id} menu LEECH_PREFIX")
+            buttons.data_button("Leech Suffix", f"userset {user_id} menu LEECH_SUFFIX")
+            buttons.data_button("Leech Caption", f"userset {user_id} menu LEECH_CAPTION")
+            buttons.data_button("Caption Replace", f"userset {user_id} menu CAPTION_WORD_REPLACE")
+            buttons.data_button(f"Caption Font ({font_label})", f"userset {user_id} font")
+            buttons.data_button(
+                state_label("AutoRename", enabled("AUTORENAME")),
+                f"userset {user_id} tog AUTORENAME {'f' if enabled('AUTORENAME') else 't'}",
+                style=state_style(enabled("AUTORENAME")),
+            )
+            buttons.data_button("AutoRename Template", f"userset {user_id} menu lremname_auto")
+            buttons.data_button("Back", f"userset {user_id} leech", "footer")
+        else:
+            buttons.data_button(
+                state_label("Complete Msg", enabled("LEECH_COMPLETE_MSG")),
+                f"userset {user_id} tog LEECH_COMPLETE_MSG {'f' if enabled('LEECH_COMPLETE_MSG') else 't'}",
+                style=state_style(enabled("LEECH_COMPLETE_MSG")),
+            )
+            buttons.data_button(
+                state_label("Sequential Leech", enabled("SEQUENTIAL_LEECH")),
+                f"userset {user_id} tog SEQUENTIAL_LEECH {'f' if enabled('SEQUENTIAL_LEECH') else 't'}",
+                style=state_style(enabled("SEQUENTIAL_LEECH")),
+            )
+            buttons.data_button("Subtitle Target", f"userset {user_id} menu SUBTITLE_TRANSLATE_TARGET")
+            buttons.data_button("Intro Subtitle", f"userset {user_id} menu INTRO_SUBTITLE_TEXT")
+            buttons.data_button("Back", f"userset {user_id} leech", "footer")
         buttons.data_button(f"{RED_DOT} Close", f"userset {user_id} close", "footer", style=ButtonStyle.DANGER)
         btns = buttons.build_menu(2)
 
@@ -1711,8 +1732,23 @@ async def add_file(_, message, ftype, rfunc):
         await message.download(file_name=des_dir)
     await delete_message(message)
     update_user_ldata(user_id, ftype, des_dir)
+    if ftype in {"THUMBNAIL", "THUMBNAIL_LANDSCAPE", "THUMBNAIL_POSTER"}:
+        update_user_ldata(user_id, "THUMBNAIL_MODE", "manual")
+        await database.update_user_data(user_id)
     await rfunc()
     await database.update_user_doc(user_id, ftype, des_dir)
+
+
+@new_task
+async def search_manual_thumbnail(_, message, rfunc):
+    from .poster_search import start_thumbnail_picker
+
+    handler_dict[message.from_user.id] = False
+    query_text = str(message.text or "").strip()
+    if query_text:
+        await start_thumbnail_picker(message, query_text, "settings")
+    await delete_message(message)
+    await rfunc()
 
 
 @new_task
@@ -2104,7 +2140,7 @@ async def get_menu(option, message, user_id):
             getattr(Config, "AUTORENAME_CLEAN_SEPARATORS", False),
         )
         buttons.data_button(
-            f"{'🟢' if clean_enabled else '🔴'} Remove . _ -",
+            f"{'🟢' if clean_enabled else '🔴'} Remove . -",
             f"userset {user_id} tog AUTORENAME_CLEAN_SEPARATORS {'f' if clean_enabled else 't'}",
             "header",
         )
@@ -2125,7 +2161,23 @@ async def get_menu(option, message, user_id):
             buttons.data_button("Reset", f"userset {user_id} reset {option}")
         elif await aiopath.exists(file_dict[option]):
             buttons.data_button("Remove", f"userset {user_id} remove {option}")
-    if option in leech_options:
+    if option in {"LEECH_SPLIT_SIZE", "LEECH_DUMP_CHAT"}:
+        back_to = "leech_upload"
+    elif option in {"THUMBNAIL", "THUMBNAIL_LAYOUT"}:
+        back_to = "leech_thumbs"
+    elif option in {
+        "LEECH_PREFIX",
+        "LEECH_SUFFIX",
+        "LEECH_CAPTION",
+        "CAPTION_WORD_REPLACE",
+        "LEECH_FONT",
+        "lremname_auto",
+        "lremname_regex",
+    }:
+        back_to = "leech_naming"
+    elif option in {"SUBTITLE_TRANSLATE_TARGET", "INTRO_SUBTITLE_TEXT"}:
+        back_to = "leech_process"
+    elif option in leech_options:
         back_to = "leech"
     elif option in auto_process_options:
         back_to = "autoprocess"
@@ -2378,20 +2430,40 @@ async def edit_user_settings(client, query):
         next_value = order[(order.index(current) + 1) % len(order)] if current in order else ""
         update_user_ldata(user_id, "LEECH_FONT", next_value)
         await database.update_user_data(user_id)
-        await update_user_settings(query, "leech")
+        await update_user_settings(query, "leech_naming")
     elif data[2] == "thumbmode":
         await query.answer("Thumbnail mode updated.", show_alert=True)
         mode = data[3] if len(data) > 3 and data[3] in {"automatic", "manual"} else "automatic"
         update_user_ldata(user_id, "THUMBNAIL_MODE", mode)
         await database.update_user_data(user_id)
         await update_user_settings(query, "thumbmanual")
+    elif data[2] == "thumbsearch":
+        await query.answer()
+        buttons = ButtonMaker()
+        buttons.data_button("Back", f"userset {user_id} thumbmanual", "footer")
+        await edit_message(
+            message,
+            "Send a title with an optional season/episode.\n"
+            "Examples: <code>Naruto S02</code> or <code>Naruto S02E07</code>\n"
+            "Timeout: 60 sec",
+            buttons.build_menu(1),
+        )
+        rfunc = partial(update_user_settings, query, "thumbmanual")
+        pfunc = partial(search_manual_thumbnail, rfunc=rfunc)
+        await event_handler(client, query, pfunc, rfunc)
+        return
     elif data[2] == "thumbart":
         action = data[3] if len(data) > 3 else ""
         kind = data[4] if len(data) > 4 else ""
-        if kind not in {"landscape", "poster"}:
+        if kind not in {"landscape", "poster", "generic"}:
             await query.answer("Invalid artwork type.", show_alert=True)
             return
-        artwork_path = f"thumbnails/{user_id}_{kind}.jpg"
+        artwork_path = (
+            f"thumbnails/{user_id}.jpg"
+            if kind == "generic"
+            else f"thumbnails/{user_id}_{kind}.jpg"
+        )
+        storage_key = "THUMBNAIL" if kind == "generic" else f"THUMBNAIL_{kind.upper()}"
         if action == "view":
             await query.answer()
             if await aiopath.exists(artwork_path):
@@ -2400,7 +2472,8 @@ async def edit_user_settings(client, query):
             await query.answer("Artwork removed.", show_alert=True)
             if await aiopath.exists(artwork_path):
                 await remove(artwork_path)
-            user_dict.pop(f"THUMBNAIL_{kind.upper()}", None)
+            user_dict.pop(storage_key, None)
+            await database.update_user_doc(user_id, storage_key)
             await database.update_user_data(user_id)
             await update_user_settings(query, "thumbmanual")
         elif action == "upload":
@@ -2413,7 +2486,11 @@ async def edit_user_settings(client, query):
                 buttons.build_menu(1),
             )
             rfunc = partial(update_user_settings, query, "thumbmanual")
-            ftype = "THUMBNAIL_LANDSCAPE" if kind == "landscape" else "THUMBNAIL_POSTER"
+            ftype = {
+                "landscape": "THUMBNAIL_LANDSCAPE",
+                "poster": "THUMBNAIL_POSTER",
+                "generic": "THUMBNAIL",
+            }[kind]
             pfunc = partial(add_file, ftype=ftype, rfunc=rfunc)
             await event_handler(client, query, pfunc, rfunc, photo=True)
         return
@@ -2421,6 +2498,10 @@ async def edit_user_settings(client, query):
         "general",
         "mirror",
         "leech",
+        "leech_upload",
+        "leech_thumbs",
+        "leech_naming",
+        "leech_process",
         "thumbmanual",
         "userbot",
         "userbot_tokens",
@@ -2610,8 +2691,14 @@ async def edit_user_settings(client, query):
             back_to = "general"
         elif data[3] in ["AUTO_POSTER_ENABLED", "AUTO_POSTER_USE_AS_THUMBNAIL"]:
             back_to = "post"
-        elif data[3] == "AUTORENAME_CLEAN_SEPARATORS":
-            back_to = "leech"
+        elif data[3] in {"AS_DOCUMENT", "USER_TRANSMISSION", "HYBRID_LEECH"}:
+            back_to = "leech_upload"
+        elif data[3] == "AUTO_THUMBNAIL":
+            back_to = "leech_thumbs"
+        elif data[3] in {"AUTORENAME", "AUTORENAME_CLEAN_SEPARATORS"}:
+            back_to = "leech_naming"
+        elif data[3] in {"LEECH_COMPLETE_MSG", "SEQUENTIAL_LEECH"}:
+            back_to = "leech_process"
         elif data[3].startswith("AUTO_") and data[3] != "AUTO_THUMBNAIL":
             back_to = "autoprocess"
         else:

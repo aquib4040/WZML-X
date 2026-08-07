@@ -119,7 +119,15 @@ class DbManager:
             return
         data = user_data.get(user_id, {})
         data = data.copy()
-        for key in ("THUMBNAIL", "RCLONE_CONFIG", "TOKEN_PICKLE", "USER_COOKIE_FILE"):
+        file_keys = (
+            "THUMBNAIL",
+            "THUMBNAIL_LANDSCAPE",
+            "THUMBNAIL_POSTER",
+            "RCLONE_CONFIG",
+            "TOKEN_PICKLE",
+            "USER_COOKIE_FILE",
+        )
+        for key in file_keys:
             data.pop(key, None)
         pipeline = [
             {
@@ -135,12 +143,7 @@ class DbManager:
                                         "cond": {
                                             "$in": [
                                                 "$$field.k",
-                                                [
-                                                    "THUMBNAIL",
-                                                    "RCLONE_CONFIG",
-                                                    "TOKEN_PICKLE",
-                                                    "USER_COOKIE_FILE",
-                                                ],
+                                                list(file_keys),
                                             ]
                                         },
                                     }

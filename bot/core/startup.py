@@ -349,6 +349,8 @@ async def load_settings():
                 del row["_id"]
                 paths = {
                     "THUMBNAIL": f"thumbnails/{uid}.jpg",
+                    "THUMBNAIL_LANDSCAPE": f"thumbnails/{uid}_landscape.jpg",
+                    "THUMBNAIL_POSTER": f"thumbnails/{uid}_poster.jpg",
                     "RCLONE_CONFIG": f"rclone/{uid}.conf",
                     "TOKEN_PICKLE": f"tokens/{uid}.pickle",
                     "USER_COOKIE_FILE": f"cookies/{uid}/cookies.txt",
