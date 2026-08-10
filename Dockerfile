@@ -30,6 +30,7 @@ RUN apt-get update \
         libcrypto++-dev \
         libcurl4-openssl-dev \
         libfreeimage-dev \
+        libsodium-dev \
         libsqlite3-dev \
         libssl-dev \
         libtool \
@@ -81,6 +82,7 @@ RUN sed -i 's/Components: main/Components: main contrib non-free/g' /etc/apt/sou
         libfreeimage3 \
         libmagic1 \
         libsqlite3-0 \
+        libsodium23 \
         libssl-dev \
         libxml2-dev \
         libxslt1-dev \
