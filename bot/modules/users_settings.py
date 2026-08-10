@@ -1794,25 +1794,6 @@ async def set_option(_, message, option, rfunc):
     user_id = message.from_user.id
     handler_dict[user_id] = False
     value = message.text
-    auto_remove_enabled = user_data.get(user_id, {}).get(
-        "AUTO_REMOVE_STREAMS", Config.AUTO_REMOVE_STREAMS
-    )
-    if (
-        option
-        in {
-            "AUTO_KEEP_AUDIO_LANGS",
-            "AUTO_KEEP_SUBTITLE_LANGS",
-            "AUTO_AUDIO_ORDER",
-            "AUTO_SUBTITLE_ORDER",
-        }
-        and str(value or "").strip()
-        and auto_remove_enabled
-    ):
-        await send_message(
-            message,
-            "Auto Remove Streams is enabled. Disable it before setting Keep/Order values.",
-        )
-        return
     if option == "LEECH_SPLIT_SIZE":
         if not value.isdigit():
             value = get_size_bytes(value)
@@ -1903,6 +1884,14 @@ async def set_option(_, message, option, rfunc):
             await send_message(message, "It must be dict!")
             return
     update_user_ldata(user_id, option, value)
+    if option in {
+        "AUTO_KEEP_AUDIO_LANGS",
+        "AUTO_KEEP_SUBTITLE_LANGS",
+        "AUTO_AUDIO_ORDER",
+        "AUTO_SUBTITLE_ORDER",
+    } and str(value or "").strip():
+        # A configured stream rule is explicit user intent to process media.
+        update_user_ldata(user_id, "AUTO_PROCESS", True)
     await delete_message(message)
     await rfunc()
     await database.update_user_data(user_id)
@@ -2649,42 +2638,19 @@ async def edit_user_settings(client, query):
         text = f"""⌬ <b>Select Uphoster Destinations :</b>"""
         await edit_message(message, text, buttons.build_menu(1))
     elif data[2] == "menu":
-        if data[3] in {
-            "AUTO_KEEP_AUDIO_LANGS",
-            "AUTO_KEEP_SUBTITLE_LANGS",
-            "AUTO_AUDIO_ORDER",
-            "AUTO_SUBTITLE_ORDER",
-        } and user_data.get(user_id, {}).get("AUTO_REMOVE_STREAMS", Config.AUTO_REMOVE_STREAMS):
-            await query.answer(
-                "Disable Auto Remove Streams before setting Keep/Order values.",
-                show_alert=True,
-            )
-            return
         await query.answer()
         await get_menu(data[3], message, user_id)
     elif data[2] == "tog":
         key = data[3]
         enabling = data[4] == "t"
-        if key == "AUTO_ORDER" and enabling and user_data.get(user_id, {}).get("AUTO_REMOVE_STREAMS", Config.AUTO_REMOVE_STREAMS):
-            await query.answer(
-                "Disable Auto Remove Streams before enabling Auto Order.",
-                show_alert=True,
-            )
-            return
         await query.answer()
         if data[3] == "RENAME_METHOD":
             update_user_ldata(user_id, data[3], data[4])
         else:
             update_user_ldata(user_id, data[3], data[4] == "t")
-        if key == "AUTO_REMOVE_STREAMS" and enabling:
-            for conflict_key in (
-                "AUTO_KEEP_AUDIO_LANGS",
-                "AUTO_KEEP_SUBTITLE_LANGS",
-                "AUTO_AUDIO_ORDER",
-                "AUTO_SUBTITLE_ORDER",
-            ):
-                update_user_ldata(user_id, conflict_key, "")
-            update_user_ldata(user_id, "AUTO_ORDER", False)
+        if key in {"AUTO_REMOVE_STREAMS", "AUTO_ORDER"} and enabling:
+            # These toggles have no effect unless the auto-processing pipeline runs.
+            update_user_ldata(user_id, "AUTO_PROCESS", True)
         if data[3] == "STOP_DUPLICATE":
             back_to = "gdrive"
         elif data[3] in ["USER_TOKENS", "USE_DEFAULT_COOKIE"]:

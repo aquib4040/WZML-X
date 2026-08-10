@@ -1372,10 +1372,9 @@ async def _execute_vt_pipeline(listener, input_path, state):
     output_path = ospath.join(dir_path, f"vt_{stem}{output_ext}")
     await _send_track_merge_planner(listener, input_path, state, extra_inputs, output_path)
 
+    # taskset can reference host CPU IDs unavailable inside the container.
+    # Bounded FFmpeg threads below retain the resource limit without affinity.
     cmd = [
-        "taskset",
-        "-c",
-        get_ffmpeg_cores(),
         BinConfig.FFMPEG_NAME,
         "-hide_banner", "-loglevel", "error",
         "-progress", "pipe:1",

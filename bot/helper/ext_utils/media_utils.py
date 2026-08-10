@@ -375,10 +375,10 @@ async def get_audio_thumbnail(audio_file):
     output_dir = f"{DOWNLOAD_DIR}thumbnails"
     await makedirs(output_dir, exist_ok=True)
     output = ospath.join(output_dir, f"{time()}.jpg")
+    # CPU affinity from the host is often invalid inside Docker/cgroup-limited
+    # deployments. Keep the bounded FFmpeg thread count below, but do not make
+    # thumbnail generation fail just because taskset cannot pin a CPU.
     cmd = [
-        "taskset",
-        "-c",
-        get_ffmpeg_cores(),
         BinConfig.FFMPEG_NAME,
         "-hide_banner",
         "-loglevel",
@@ -418,10 +418,9 @@ async def get_video_thumbnail(video_file, duration):
     if duration == 0:
         duration = 3
     duration = max(1, duration // 10)
+    # Do not use host CPU affinity here: it is invalid in many containers and
+    # was preventing the final frame fallback from being generated.
     cmd = [
-        "taskset",
-        "-c",
-        get_ffmpeg_cores(),
         BinConfig.FFMPEG_NAME,
         "-hide_banner",
         "-loglevel",

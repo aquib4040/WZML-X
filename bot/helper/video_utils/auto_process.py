@@ -313,18 +313,6 @@ async def _auto_keep_streams(listener, up_path):
 
 
 async def _auto_remove_streams(listener, up_path):
-    if _has_keep_filters(listener) or _user_value(listener, "AUTO_AUDIO_ORDER") or _user_value(listener, "AUTO_SUBTITLE_ORDER") or bool_setting(listener, "AUTO_ORDER"):
-        await send_message(
-            listener.message,
-            "Auto Remove Streams skipped: Auto Remove cannot run together with Keep/Order settings.",
-        )
-        return up_path
-    await send_message(
-        listener.message,
-        "Auto Remove Streams skipped: no remove list is configured. Use Auto -vt or manual -vt to select streams.",
-    )
-    return up_path
-
     keep_audio = _lang_set(_user_value(listener, "AUTO_KEEP_AUDIO_LANGS"))
     keep_sub = _lang_set(_user_value(listener, "AUTO_KEEP_SUBTITLE_LANGS"))
     audio_order = _user_value(listener, "AUTO_AUDIO_ORDER")
@@ -351,12 +339,12 @@ async def _auto_remove_streams(listener, up_path):
             if audio_tracks and not audio_keep:
                 await send_message(
                     listener.message,
-                    f"Auto Remove Streams skipped for <code>{ospath.basename(video)}</code>: no matching audio language found for <code>{', '.join(sorted(keep_audio))}</code>.",
+                    f"Auto Remove Streams warning for <code>{ospath.basename(video)}</code>: no matching audio language found for <code>{', '.join(sorted(keep_audio))}</code>. Keeping existing audio.",
                 )
-                continue
-            state["remove_audio"] = [
-                t["index"] for t in audio_tracks if t["index"] not in audio_keep
-            ]
+            else:
+                state["remove_audio"] = [
+                    t["index"] for t in audio_tracks if t["index"] not in audio_keep
+                ]
         if keep_sub:
             sub_keep = [
                 t["index"]
