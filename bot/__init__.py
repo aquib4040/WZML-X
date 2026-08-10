@@ -1,38 +1,37 @@
 # ruff: noqa: E402
+try:
+    from uvloop import install
 
-from uvloop import install
-
-install()
+    install()
+except ImportError:
+    pass
 
 from asyncio import new_event_loop, set_event_loop
 
 bot_loop = new_event_loop()
 set_event_loop(bot_loop)
 
-from subprocess import run as srun
-from os import getcwd
 from asyncio import Lock
 from logging import (
     ERROR,
     INFO,
     WARNING,
-    FileHandler,
     StreamHandler,
     basicConfig,
     getLogger,
 )
+from logging.handlers import RotatingFileHandler
 from os import cpu_count
 from time import time
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from .core.config_manager import BinConfig
+from .core.config_manager import Config
 from sabnzbdapi import SabnzbdClient
 
 getLogger("requests").setLevel(WARNING)
 getLogger("urllib3").setLevel(WARNING)
 getLogger("pyrogram").setLevel(ERROR)
-getLogger("aiohttp").setLevel(ERROR)
 getLogger("apscheduler").setLevel(ERROR)
 getLogger("httpx").setLevel(WARNING)
 getLogger("pymongo").setLevel(WARNING)
@@ -41,20 +40,31 @@ getLogger("aiohttp").setLevel(WARNING)
 
 bot_start_time = time()
 
-bot_loop = new_event_loop()
-set_event_loop(bot_loop)
-
 basicConfig(
     format="[%(asctime)s] [%(levelname)s] - %(message)s",  #  [%(filename)s:%(lineno)d]
     datefmt="%d-%b-%y %I:%M:%S %p",
-    handlers=[FileHandler("log.txt"), StreamHandler()],
+    handlers=[
+        RotatingFileHandler(
+            "log.txt",
+            maxBytes=10 * 1024 * 1024,
+            backupCount=2,
+            encoding="utf-8",
+        ),
+        StreamHandler(),
+    ],
     level=INFO,
 )
 
 LOGGER = getLogger(__name__)
-cpu_no = cpu_count()
+cpu_no = cpu_count() or 1
 threads = max(1, cpu_no // 2)
-cores = ",".join(str(i) for i in range(threads))
+cores = ",".join(str(i) for i in range(1, threads + 1))
+
+if cpu_no <= 1 or cpu_no == 2:
+    service_cores = ""
+else:
+    service_start = threads + 1
+    service_cores = ",".join(str(i) for i in range(service_start, cpu_no + 1))
 
 bot_cache = {}
 DOWNLOAD_DIR = "/usr/src/app/downloads/"
@@ -68,10 +78,14 @@ qbit_options = {}
 nzb_options = {}
 queued_dl = {}
 queued_up = {}
+rss_queued_dl = {}
+rss_queued_up = {}
 status_dict = {}
 task_dict = {}
 rss_dict = {}
 shortener_dict = {}
+categories_dict = {}
+list_drives_dict = {}
 var_list = [
     "BOT_TOKEN",
     "TELEGRAM_API",
@@ -81,13 +95,6 @@ var_list = [
     "BASE_URL",
     "UPSTREAM_REPO",
     "UPSTREAM_BRANCH",
-    "UPDATE_PKGS",
-    "AUTO_THUMBNAIL",
-    "TMDB_ACCESS_TOKEN",
-    "AUTORENAME",
-    "RENAME_METHOD",
-    "LEECH_FILENAME_REMNAME_AUTO",
-    "LEECH_FILENAME_REMNAME_REGEX",
 ]
 auth_chats = {}
 excluded_extensions = ["aria2", "!qB"]
@@ -97,20 +104,61 @@ index_urls = []
 sudo_users = []
 non_queued_dl = set()
 non_queued_up = set()
+rss_non_queued_dl = set()
+rss_non_queued_up = set()
 multi_tags = set()
 task_dict_lock = Lock()
 queue_dict_lock = Lock()
 qb_listener_lock = Lock()
 nzb_listener_lock = Lock()
 jd_listener_lock = Lock()
-cpu_eater_lock = Lock()
 same_directory_lock = Lock()
+cpu_eater_lock = Lock()
+
+
+def _sabnzbd_key():
+    from bot.helper.ext_utils.bot_utils import derive_service_password
+
+    return derive_service_password(
+        (Config.BOT_TOKEN or "").split(":", 1)[0] or "0",
+        "sabnzbd",
+    )
+
+
+def _update_sabnzbd_ini(api_key):
+    from re import compile as _re, MULTILINE
+
+    pat_key = _re(r"^api_key\s*=.*$", MULTILINE)
+    pat_pwd = _re(r"^password\s*=.*$", MULTILINE)
+    try:
+        with open("configs/sabnzbd/SABnzbd.ini", "r+") as f:
+            content = f.read()
+            new = content
+            new = pat_key.sub(f"api_key = {api_key}", new)
+            new = pat_pwd.sub(f"password = {api_key}", new)
+            if new == content:
+                return
+            f.seek(0)
+            f.truncate()
+            f.write(new)
+            LOGGER.info("SABnzbd.ini Updated with derived api_key")
+    except FileNotFoundError:
+        LOGGER.warning("SABnzbd.ini not found, skipping patch")
+    except Exception as e:
+        LOGGER.error(f"SABnzbd.ini patch failed: {e}")
+
+
+if not Config.WEB_ACCESS_PASSWORD:
+    from secrets import token_hex
+
+    Config.WEB_ACCESS_PASSWORD = token_hex(32)
+
+_sabnzbd_api_key = _sabnzbd_key()
 
 sabnzbd_client = SabnzbdClient(
     host="http://localhost",
-    api_key="admin",
+    api_key=_sabnzbd_api_key,
     port="8070",
 )
-srun([BinConfig.QBIT_NAME, "-d", f"--profile={getcwd()}"], check=False)
 
 scheduler = AsyncIOScheduler(event_loop=bot_loop)

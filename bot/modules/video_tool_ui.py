@@ -1,145 +1,340 @@
-from time import time
-
+from pyrogram.enums import ButtonStyle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .. import LOGGER
-from ..helper.video_utils.video_tools import get_vt_event, get_vt_state
+from ..core.config_manager import Config
+from ..helper.video_utils.video_tools import (
+    UI_TIMEOUT,
+    finish_merge_track_intake,
+    generate_merge_preview,
+    get_vt_event,
+    get_vt_state,
+    start_merge_track_intake,
+)
 
 
-async def render_video_tools_main(vt_msg, state):
-    """Render the main Video Tools menu."""
-    text = (
-        f"<b>🎬 Video Tools Configuration</b>\n\n"
-        f"<b>File:</b> <code>{state['filename']}</code>\n\n"
-        f"<b>Audio Tracks:</b> {len(state['audio_tracks'])}\n"
-        f"<b>Subtitles:</b> {len(state['sub_tracks'])}\n\n"
-        f"⏳ <b>Timeout:</b> 300 sec"
-    )
+def _selected_icon(selected):
+    return "\U0001F7E2 " if selected else ""
 
+
+def _state_style(selected):
+    return _btn_style(ButtonStyle.SUCCESS) if selected else _btn_style()
+
+
+def _btn_style(style=None):
+    if not Config.COLORED_BTNS:
+        return ButtonStyle.DEFAULT
+    return style or ButtonStyle.PRIMARY
+
+
+def _danger_label(label):
+    return f"\U0001F534 {label}"
+
+
+def _has_extract_selection(state):
+    return bool(state.get("extract_audio") or state.get("extract_sub"))
+
+
+def _clear_non_extract_tools(state):
+    for key in (
+        "remove_audio",
+        "remove_sub",
+        "merge_audio",
+        "merge_sub",
+        "translate_sub",
+        "keep_audio",
+        "keep_sub",
+        "audio_order",
+        "sub_order",
+    ):
+        state[key] = []
+    state["audio_order_value"] = ""
+    state["sub_order_value"] = ""
+    state["default_audio"] = None
+    state["default_sub"] = None
+    state["intro_subtitle"] = False
+    state["video_merge"] = False
+
+
+def _tracks_for(state, action_key):
+    if action_key == "merge_audio":
+        return state.get("external_audio", [])
+    if action_key == "merge_sub":
+        return state.get("external_sub", [])
+    if "audio" in action_key:
+        return state.get("audio_tracks", [])
+    return state.get("sub_tracks", [])
+
+
+def _track_text(track):
+    if "name" in track:
+        return track["name"]
+    return f"Track {track['index'] + 1} - {str(track.get('lang', 'unk')).upper()} ({track.get('codec', '')})"
+
+
+async def render_merge_intake(vt_msg, state):
     task_id = state["task_id"]
-
-    markup = InlineKeyboardMarkup(
+    audio = state.get("external_audio", [])
+    subtitles = state.get("external_sub", [])
+    lines = [
+        "<b>Merge Tracks</b>",
+        "",
+        "Send audio, subtitle, or video files to this chat.",
+        "Muxing starts only after Done.",
+        "Selected new audio is placed first and used by Preview.",
+        f"Audio: <b>{len(audio)}</b> | Subtitles: <b>{len(subtitles)}</b>",
+    ]
+    rows = []
+    for item in audio:
+        selected = item["index"] in state.get("merge_audio", [])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{_selected_icon(selected)}A{item['index'] + 1}: {item.get('language', 'und')} | {item.get('delay_ms', 0)} ms",
+                    callback_data=f"vt_mergecfg_{item['index']}_{task_id}",
+                    style=_state_style(selected),
+                )
+            ]
+        )
+    rows.extend(
         [
             [
                 InlineKeyboardButton(
-                    "🗑️ Remove Stream", callback_data=f"vt_remove_{task_id}"
-                ),
-                InlineKeyboardButton(
-                    "📤 Extract Stream", callback_data=f"vt_extract_{task_id}"
-                ),
+                    "🔴 Remove Current Audio" if state.get("remove_original_audio") else "🟢 Keep Current Audio",
+                    callback_data=f"vt_mergeoriginal_{task_id}",
+                    style=_btn_style(ButtonStyle.DANGER if state.get("remove_original_audio") else ButtonStyle.SUCCESS),
+                )
             ],
+            [InlineKeyboardButton("Preview 120s", callback_data=f"vt_preview_{task_id}")],
             [
-                InlineKeyboardButton(
-                    "🔀 Audio Swap", callback_data=f"vt_swap_{task_id}"
-                ),
-                InlineKeyboardButton(
-                    "🎧 Default Audio", callback_data=f"vt_defa_{task_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔠 Default Subtitle", callback_data=f"vt_defs_{task_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "✅ Done", callback_data=f"vt_done_{task_id}"
-                ),
-                InlineKeyboardButton(
-                    "❌ Close", callback_data=f"vt_close_{task_id}"
-                ),
+                InlineKeyboardButton("🟢 Done", callback_data=f"vt_done_{task_id}", style=_btn_style(ButtonStyle.SUCCESS)),
+                InlineKeyboardButton("Back", callback_data=f"vt_main_{task_id}"),
             ],
         ]
     )
+    await vt_msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
 
+
+async def render_merge_audio_config(query, state, index):
+    if not any(
+        entry["index"] == index for entry in state.get("external_audio", [])
+    ):
+        await query.answer("Audio track no longer exists.", show_alert=True)
+        return
+    await render_merge_audio_config_message(query.message, state, index)
+
+
+async def render_merge_audio_config_message(message, state, index):
+    item = next(
+        (entry for entry in state.get("external_audio", []) if entry["index"] == index),
+        None,
+    )
+    if not item:
+        return
+    task_id = state["task_id"]
+    selected = index in state.get("merge_audio", [])
+    text = (
+        "<b>External Audio Settings</b>\n\n"
+        f"<b>Track:</b> <code>{item['name']}</code>\n"
+        f"<b>Language:</b> <code>{item.get('language', 'und')}</code>\n"
+        f"<b>Delay:</b> <code>{item.get('delay_ms', 0)} ms</code>\n"
+        f"<b>Title:</b> <code>{item.get('title', '')}</code>\n\n"
+        "Delay accepts signed integer milliseconds only."
+    )
+    rows = [
+        [
+            InlineKeyboardButton("Language", callback_data=f"vt_mergefield_language_{index}_{task_id}"),
+            InlineKeyboardButton("Delay (ms)", callback_data=f"vt_mergefield_delay_ms_{index}_{task_id}"),
+        ],
+        [InlineKeyboardButton("Track Title", callback_data=f"vt_mergefield_title_{index}_{task_id}")],
+        [
+            InlineKeyboardButton(
+                "🟢 Included" if selected else "🔴 Excluded",
+                callback_data=f"vt_mergetoggle_{index}_{task_id}",
+                style=_state_style(selected) if selected else _btn_style(ButtonStyle.DANGER),
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔴 Remove Current Audio" if state.get("remove_original_audio") else "🟢 Keep Current Audio",
+                callback_data=f"vt_mergeoriginal_{task_id}",
+                style=_btn_style(ButtonStyle.DANGER if state.get("remove_original_audio") else ButtonStyle.SUCCESS),
+            )
+        ],
+        [InlineKeyboardButton("Preview 120s", callback_data=f"vt_preview_{task_id}")],
+        [
+            InlineKeyboardButton("🟢 Done", callback_data=f"vt_done_{task_id}", style=_btn_style(ButtonStyle.SUCCESS)),
+            InlineKeyboardButton("Back", callback_data=f"vt_mergeback_{task_id}"),
+        ],
+    ]
+    await message.edit_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def render_video_tools_main(vt_msg, state):
+    extract_selected = _has_extract_selection(state)
+    text = (
+        "<b>Video Tools Configuration</b>\n\n"
+        f"<b>File:</b> <code>{state['filename']}</code>\n\n"
+        f"<b>Audio Tracks:</b> {len(state['audio_tracks'])}\n"
+        f"<b>Subtitles:</b> {len(state['sub_tracks'])}\n"
+        f"<b>External Audio:</b> {len(state.get('external_audio', []))}\n"
+        f"<b>External Subtitles:</b> {len(state.get('external_sub', []))}\n"
+        f"<b>Video + Video:</b> {'On' if state.get('video_merge') else 'Off'}\n\n"
+        f"<b>Timeout:</b> {UI_TIMEOUT} sec"
+    )
+    task_id = state["task_id"]
+    if extract_selected:
+        text += "\n\n<b>Extract mode:</b> enabled. Other Video Tools actions are disabled."
+        rows = [
+            [InlineKeyboardButton(_selected_icon(True) + "Extract Stream", callback_data=f"vt_extract_{task_id}", style=_btn_style(ButtonStyle.SUCCESS))],
+            [
+                InlineKeyboardButton("\U0001F7E2 Done", callback_data=f"vt_done_{task_id}", style=_btn_style(ButtonStyle.SUCCESS)),
+                InlineKeyboardButton(_danger_label("Close"), callback_data=f"vt_close_{task_id}", style=_btn_style(ButtonStyle.DANGER)),
+            ],
+        ]
+    else:
+        rows = [
+            [
+                InlineKeyboardButton(_danger_label("Remove Stream"), callback_data=f"vt_remove_{task_id}", style=_btn_style(ButtonStyle.DANGER)),
+                InlineKeyboardButton("Extract Stream", callback_data=f"vt_extract_{task_id}"),
+            ],
+            [InlineKeyboardButton("Change Order", callback_data=f"vt_order_{task_id}")],
+            [
+                InlineKeyboardButton("Merge Tracks", callback_data=f"vt_merge_{task_id}"),
+                InlineKeyboardButton("Translate Subs", callback_data=f"vt_translate_{task_id}"),
+            ],
+            [InlineKeyboardButton(_selected_icon(state.get("video_merge")) + "Video + Video", callback_data=f"vt_video_{task_id}", style=_state_style(state.get("video_merge")))],
+            [
+                InlineKeyboardButton("\U0001F7E2 Done", callback_data=f"vt_done_{task_id}", style=_btn_style(ButtonStyle.SUCCESS)),
+                InlineKeyboardButton(_danger_label("Close"), callback_data=f"vt_close_{task_id}", style=_btn_style(ButtonStyle.DANGER)),
+            ],
+        ]
+    markup = InlineKeyboardMarkup(rows)
     try:
         await vt_msg.edit(text, reply_markup=markup)
     except Exception as e:
         LOGGER.error(f"render_video_tools_main error: {e}")
 
 
-async def render_stream_list(query, state, action_key, title):
-    """Render the stream list for a specific action."""
+async def render_change_order(query, state):
     task_id = state["task_id"]
-    is_audio = "audio" in action_key
-    tracks = state["audio_tracks"] if is_audio else state["sub_tracks"]
-
-    # Filter out removed tracks for swap/default menus
-    if action_key in ("swap_audio", "default_audio", "default_sub"):
-        remove_list = (
-            state.get("remove_audio", [])
-            if is_audio
-            else state.get("remove_sub", [])
-        )
-        tracks = [t for t in tracks if t["index"] not in remove_list]
-
-    if not tracks:
-        back_markup = InlineKeyboardMarkup(
+    await query.message.edit_text(
+        "<b>Change Order</b>\n\nChoose the stream type to reorder.",
+        reply_markup=InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton(
-                        "⬅️ Back", callback_data=f"vt_main_{task_id}"
-                    )
-                ]
+                    InlineKeyboardButton("Audio Order", callback_data=f"vt_orderaudio_{task_id}"),
+                    InlineKeyboardButton("Subtitle Order", callback_data=f"vt_ordersub_{task_id}"),
+                ],
+                [InlineKeyboardButton("Back", callback_data=f"vt_main_{task_id}")],
             ]
+        ),
+    )
+
+
+async def render_stream_type_menu(query, task_id, mode, title):
+    await query.message.edit_text(
+        f"<b>{title}</b>\n\nChoose which stream type to configure:",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Audio", callback_data=f"vt_list_{mode}_audio_{task_id}"),
+                    InlineKeyboardButton("Subtitle", callback_data=f"vt_list_{mode}_sub_{task_id}"),
+                ],
+                [InlineKeyboardButton("Back", callback_data=f"vt_main_{task_id}")],
+            ]
+        ),
+    )
+
+
+async def render_stream_list(query, state, action_key, title):
+    task_id = state["task_id"]
+    tracks = _tracks_for(state, action_key)
+    if action_key in ("default_audio", "default_sub"):
+        remove_key = "remove_audio" if "audio" in action_key else "remove_sub"
+        tracks = [track for track in tracks if track["index"] not in state.get(remove_key, [])]
+
+    if not tracks:
+        await query.message.edit_text(
+            "<b>No tracks found</b> for this type.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Back", callback_data=f"vt_main_{task_id}")]]
+            ),
         )
-        if action_key in ("swap_audio", "default_audio", "default_sub"):
-            await query.message.edit_text(
-                "<b>No stream left!</b>\n\nKindly check your 'Remove Streams' selection.",
-                reply_markup=back_markup,
-            )
-        else:
-            await query.message.edit_text(
-                "<b>No tracks found</b> for this type.",
-                reply_markup=back_markup,
-            )
         return
 
     markup = []
-
-    for t in tracks:
-        idx = t["index"]
-        text_disp = f"Track {idx + 1} - {t['lang'].upper()} ({t.get('codec', '')})"
-
+    selected = state.get(action_key, None)
+    is_order = action_key in ("audio_order", "sub_order")
+    for track in tracks:
+        idx = track["index"]
+        selected_row = False
         if action_key in ("default_audio", "default_sub"):
-            icon = "✅ " if state[action_key] == idx else "❌ "
-        elif action_key == "swap_audio":
-            swap_val = state["swap_audio"].get(str(idx), 0)
-            icon = f"{swap_val}️⃣ " if swap_val > 0 else "❌ "
+            selected_row = selected == idx
+            icon = _selected_icon(selected_row)
+        elif is_order:
+            order = state.get(action_key, [])
+            selected_row = idx in order
+            icon = f"{order.index(idx) + 1}. {_selected_icon(True)}" if selected_row else ""
         else:
-            icon = "✅ " if idx in state[action_key] else "❌ "
+            selected_row = idx in state.get(action_key, [])
+            icon = _selected_icon(selected_row)
+        markup.append(
+            [
+                InlineKeyboardButton(
+                    icon + _track_text(track),
+                    callback_data=f"vt_toggle_{action_key}_{idx}_{task_id}",
+                    style=_state_style(selected_row),
+                )
+            ]
+        )
 
-        btn_text = icon + text_disp
-        cb_data = f"vt_toggle_{action_key}_{idx}_{task_id}"
-        markup.append([InlineKeyboardButton(btn_text, callback_data=cb_data)])
+    if action_key not in ("default_audio", "default_sub"):
+        all_indices = [track["index"] for track in tracks]
+        all_selected = len(state.get(action_key, [])) == len(all_indices)
+        markup.append(
+            [
+                InlineKeyboardButton(
+                    "\U0001F7E2 Clear Multi" if all_selected else "Multi Select",
+                    callback_data=f"vt_toggle_{action_key}_all_{task_id}",
+                    style=_btn_style(ButtonStyle.SUCCESS) if all_selected else _btn_style(),
+                )
+            ]
+        )
 
-    # Select All / Deselect All for remove/extract
-    if action_key in ("remove_audio", "remove_sub", "extract_audio", "extract_sub"):
-        is_all_selected = len(state[action_key]) == len(tracks)
-        all_text = "Deselect All" if is_all_selected else "Select All"
-        cb_all = f"vt_toggle_{action_key}_all_{task_id}"
-        markup.append([InlineKeyboardButton(all_text, callback_data=cb_all)])
-
-    # Back button
-    if action_key in ("swap_audio", "default_audio", "default_sub"):
-        back_cb = f"vt_main_{task_id}"
+    if action_key in ("remove_audio", "remove_sub"):
+        markup.append(
+            [
+                InlineKeyboardButton("Reset", callback_data=f"vt_reset_{action_key}_{task_id}"),
+                InlineKeyboardButton("Reverse", callback_data=f"vt_reverse_{action_key}_{task_id}"),
+            ]
+        )
+        markup.append(
+            [
+                InlineKeyboardButton(_danger_label("Remove"), callback_data=f"vt_removego_{task_id}", style=_btn_style(ButtonStyle.DANGER)),
+                InlineKeyboardButton("\U0001F7E2 Continue", callback_data=f"vt_main_{task_id}", style=_btn_style(ButtonStyle.SUCCESS)),
+            ]
+        )
     else:
-        root_action = action_key.split("_")[0]
-        back_cb = f"vt_{root_action}_{task_id}"
+        back = "vt_order_" + task_id if is_order else "vt_main_" + task_id
+        markup.append([InlineKeyboardButton("Back", callback_data=back)])
 
-    markup.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
+    note = ""
+    if action_key in ("keep_audio", "keep_sub") and state.get(action_key):
+        note = f"\n\n<b>Keep only:</b> {len(state[action_key])} selected stream(s)."
+    elif is_order and state.get(action_key):
+        note = f"\n\n<b>Order selected:</b> {len(state[action_key])} stream(s)."
+    elif action_key in ("remove_audio", "remove_sub") and state.get(action_key):
+        note = f"\n\n<b>Selected to remove:</b> {len(state[action_key])} stream(s)."
 
     await query.message.edit_text(
-        f"<b>{title}</b>\n\n"
-        f"Select the streams you wish to modify. Changes are saved automatically.",
+        f"<b>{title}</b>\n\nSelect streams. Changes are saved automatically.{note}",
         reply_markup=InlineKeyboardMarkup(markup),
     )
 
 
 async def video_tools_callback(_, query):
-    """Handle all vt_ callback queries."""
     data = query.data
-
     try:
         parts = data.split("_")
         if len(parts) < 3:
@@ -152,184 +347,303 @@ async def video_tools_callback(_, query):
         return
 
     event = get_vt_event(task_id)
-
     if event is None:
         await query.answer("Session expired or already processed!", show_alert=True)
         return
-
     state = get_vt_state(task_id)
-
     if state is None:
         await query.answer("Session state not found!", show_alert=True)
         return
-
     if state.get("completed"):
         await query.answer("This task is already executed!", show_alert=True)
+        return
+
+    if state.get("busy"):
+        await query.answer("Please wait for the current probe/preview/mux step.", show_alert=True)
         return
 
     await query.answer()
 
     try:
-        # CLOSE
         if action == "close":
             state["completed"] = True
             state["cancelled"] = True
             event.set()
-            await query.message.edit_text(
-                "<b>Video Tools Cancelled.</b> Proceeding normally..."
-            )
+            await query.message.edit_text("<b>Video Tools cancelled.</b> Proceeding normally...")
             return
 
-        # DONE
         if action == "done":
+            if state.get("merge_intake"):
+                if state.get("preview_stale") and state.get("merge_audio"):
+                    await query.message.edit_text(
+                        "<b>Preview required.</b> Generate the 120-second preview "
+                        "after your latest audio settings, then press Done.",
+                        reply_markup=InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("Back", callback_data=f"vt_mergeback_{task_id}")]]
+                        ),
+                    )
+                    return
+                try:
+                    finish_merge_track_intake(state, event)
+                except ValueError as error:
+                    await query.answer(str(error), show_alert=True)
+                    return
+            else:
+                state["completed"] = True
+                event.set()
+            try:
+                await query.message.edit_text("<b>Video Tools configuration saved.</b> Processing...")
+            except Exception as error:
+                if "MESSAGE_ID_INVALID" not in str(error).upper():
+                    raise
+            return
+
+        if action == "removego":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with other tools.", show_alert=True)
+                return
             state["completed"] = True
             event.set()
-            await query.message.edit_text(
-                "✅ <b>Video Tools configuration saved!</b> Processing..."
-            )
+            await query.message.edit_text("<b>Video Tools:</b> removing selected streams...")
             return
 
-        # MAIN MENU
+        if action == "video":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Video + Video.", show_alert=True)
+                return
+            state["video_merge"] = True
+            state["completed"] = True
+            event.set()
+            await query.message.edit_text("<b>Video + Video:</b> merge planner will start after download/extract.")
+            return
+
         if action == "main":
             await render_video_tools_main(query.message, state)
             return
 
-        # REMOVE / EXTRACT submenu
-        if action in ("remove", "extract"):
-            action_name = (
-                "Remove Stream" if action == "remove" else "Extract Stream"
-            )
-            markup = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "🎵 Audio",
-                            callback_data=f"vt_list_{action}_audio_{task_id}",
-                        ),
-                        InlineKeyboardButton(
-                            "📝 Subtitle",
-                            callback_data=f"vt_list_{action}_sub_{task_id}",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ Back",
-                            callback_data=f"vt_main_{task_id}",
-                        )
-                    ],
-                ]
-            )
-            await query.message.edit_text(
-                f"<b>{action_name}</b>\n\nChoose which stream type to configure:",
-                reply_markup=markup,
-            )
+        if action == "remove":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Remove Stream.", show_alert=True)
+                return
+            await render_stream_type_menu(query, task_id, "remove", "Remove Stream")
             return
 
-        # SWAP / DEFAULT AUDIO / DEFAULT SUB
-        if action == "swap":
-            await render_stream_list(query, state, "swap_audio", "Audio Swap")
+        if action == "extract":
+            _clear_non_extract_tools(state)
+            await render_stream_type_menu(query, task_id, "extract", "Extract Stream")
             return
+
+        if action == "merge":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Merge Tracks.", show_alert=True)
+                return
+            await start_merge_track_intake(query.message, state)
+            await render_merge_intake(query.message, state)
+            return
+
+        if action == "mergeback":
+            await render_merge_intake(query.message, state)
+            return
+
+        if action == "mergecfg":
+            await render_merge_audio_config(query, state, int(parts[2]))
+            return
+
+        if action == "mergetoggle":
+            index = int(parts[2])
+            selected = state.setdefault("merge_audio", [])
+            if index in selected:
+                selected.remove(index)
+            else:
+                selected.append(index)
+            state["preview_stale"] = True
+            await render_merge_audio_config(query, state, index)
+            return
+
+        if action == "mergeoriginal":
+            state["remove_original_audio"] = not state.get("remove_original_audio", False)
+            state["preview_stale"] = True
+            await render_merge_intake(query.message, state)
+            return
+
+        if action == "mergefield":
+            index = int(parts[-2])
+            field = "_".join(parts[2:-2])
+            if field not in {"language", "delay_ms", "title"}:
+                await query.answer("Invalid merge setting.", show_alert=True)
+                return
+            state["awaiting_input"] = (field, index)
+            prompt = {
+                "language": "Send the language name or ISO code, for example <code>Tamil</code> or <code>tam</code>.",
+                "delay_ms": "Send a signed integer delay in milliseconds, for example <code>-250</code> or <code>1200</code>.",
+                "title": "Send the Telegram/MKV audio track title.",
+            }[field]
+            await query.message.reply_text(prompt)
+            return
+
+        if action == "preview":
+            await query.message.edit_text("<b>Generating the 120-second middle preview...</b>")
+            try:
+                await generate_merge_preview(state)
+                selected = state.get("merge_audio", [])
+                if selected:
+                    await render_merge_audio_config_message(query.message, state, selected[0])
+                else:
+                    await render_merge_intake(query.message, state)
+            except Exception as error:
+                await query.message.edit_text(
+                    f"<b>Preview failed:</b> <code>{str(error)[:400]}</code>",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Back", callback_data=f"vt_mergeback_{task_id}")]]
+                    ),
+                )
+            return
+
+        if action == "translate":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Translate Subs.", show_alert=True)
+                return
+            await render_stream_list(query, state, "translate_sub", "Translate Subtitles")
+            return
+
+        if action == "keepaudio":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Keep Audios.", show_alert=True)
+                return
+            await render_stream_list(query, state, "keep_audio", "Keep Audios")
+            return
+
+        if action == "keepsub":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Keep Subtitles.", show_alert=True)
+                return
+            await render_stream_list(query, state, "keep_sub", "Keep Subtitles")
+            return
+
+        if action == "order":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Change Order.", show_alert=True)
+                return
+            await render_change_order(query, state)
+            return
+
+        if action == "orderaudio":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Audio Order.", show_alert=True)
+                return
+            await render_stream_list(query, state, "audio_order", "Audio Order")
+            return
+
+        if action == "ordersub":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Subtitle Order.", show_alert=True)
+                return
+            await render_stream_list(query, state, "sub_order", "Subtitle Order")
+            return
+
         if action == "defa":
-            await render_stream_list(
-                query, state, "default_audio", "Default Audio"
-            )
-            return
-        if action == "defs":
-            await render_stream_list(
-                query, state, "default_sub", "Default Subtitle"
-            )
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Default Audio.", show_alert=True)
+                return
+            await render_stream_list(query, state, "default_audio", "Default Audio")
             return
 
-        # LIST (remove/extract audio/sub)
+        if action == "defs":
+            if _has_extract_selection(state):
+                await query.answer("Extract Stream cannot be combined with Default Subtitle.", show_alert=True)
+                return
+            await render_stream_list(query, state, "default_sub", "Default Subtitle")
+            return
+
         if action == "list":
             mode = parts[2]
             track_type = parts[3]
             action_key = f"{mode}_{track_type}"
-            await render_stream_list(
-                query,
-                state,
-                action_key,
-                f"{mode.title()} {track_type.title()}",
-            )
+            if _has_extract_selection(state) and not action_key.startswith("extract_"):
+                await query.answer("Extract Stream cannot be combined with other tools.", show_alert=True)
+                return
+            title = {
+                "remove_audio": "Remove Audio",
+                "remove_sub": "Remove Subtitle",
+                "extract_audio": "Extract Audio",
+                "extract_sub": "Extract Subtitle",
+            }.get(action_key, f"{mode.title()} {track_type.title()}")
+            await render_stream_list(query, state, action_key, title)
             return
 
-        # TOGGLE
         if action == "toggle":
             action_key = parts[2] + "_" + parts[3]
             idx_str = parts[4]
+            if _has_extract_selection(state) and not action_key.startswith("extract_"):
+                await query.answer("Extract Stream cannot be combined with other tools.", show_alert=True)
+                return
+            tracks = _tracks_for(state, action_key)
+            all_indices = [track["index"] for track in tracks]
 
             if idx_str == "all":
-                tracks = (
-                    state["audio_tracks"]
-                    if "audio" in action_key
-                    else state["sub_tracks"]
-                )
-                all_indices = [t["index"] for t in tracks]
-                if len(state[action_key]) == len(all_indices):
-                    state[action_key] = []
+                if action_key in ("default_audio", "default_sub"):
+                    state[action_key] = None
                 else:
-                    state[action_key] = list(all_indices)
+                    state[action_key] = [] if len(state.get(action_key, [])) == len(all_indices) else list(all_indices)
             else:
                 idx = int(idx_str)
                 if action_key in ("default_audio", "default_sub"):
-                    if state[action_key] == idx:
-                        state[action_key] = None
-                    else:
-                        state[action_key] = idx
-                elif action_key == "swap_audio":
-                    curr_val = state["swap_audio"].get(str(idx), 0)
-                    if curr_val == 0:
-                        max_val = (
-                            max(state["swap_audio"].values())
-                            if state["swap_audio"]
-                            else 0
-                        )
-                        state["swap_audio"][str(idx)] = max_val + 1
-                    else:
-                        del state["swap_audio"][str(idx)]
-                        sorted_swaps = sorted(
-                            state["swap_audio"].items(), key=lambda x: x[1]
-                        )
-                        state["swap_audio"] = {
-                            k: i + 1 for i, (k, v) in enumerate(sorted_swaps)
-                        }
-                else:
+                    state[action_key] = None if state[action_key] == idx else idx
+                elif action_key in ("audio_order", "sub_order"):
+                    state.setdefault(action_key, [])
                     if idx in state[action_key]:
                         state[action_key].remove(idx)
                     else:
                         state[action_key].append(idx)
-                        # If removing, clean up swap/default references
-                        if action_key == "remove_audio":
-                            if state.get("default_audio") == idx:
-                                state["default_audio"] = None
-                            if str(idx) in state.get("swap_audio", {}):
-                                del state["swap_audio"][str(idx)]
-                                sorted_swaps = sorted(
-                                    state["swap_audio"].items(),
-                                    key=lambda x: x[1],
-                                )
-                                state["swap_audio"] = {
-                                    k: i + 1
-                                    for i, (k, v) in enumerate(sorted_swaps)
-                                }
-                        elif action_key == "remove_sub":
-                            if state.get("default_sub") == idx:
-                                state["default_sub"] = None
+                else:
+                    state.setdefault(action_key, [])
+                    if idx in state[action_key]:
+                        state[action_key].remove(idx)
+                    else:
+                        state[action_key].append(idx)
+                    if action_key == "remove_audio" and state.get("default_audio") == idx:
+                        state["default_audio"] = None
+                    if action_key == "remove_sub" and state.get("default_sub") == idx:
+                        state["default_sub"] = None
+            if action_key.startswith("extract_") and state.get(action_key):
+                _clear_non_extract_tools(state)
 
             title_map = {
                 "remove_audio": "Remove Audio",
                 "remove_sub": "Remove Subtitle",
                 "extract_audio": "Extract Audio",
                 "extract_sub": "Extract Subtitle",
-                "swap_audio": "Audio Swap",
+                "merge_audio": "Merge Audio Files",
+                "merge_sub": "Merge Subtitle Files",
+                "translate_sub": "Translate Subtitles",
+                "keep_audio": "Keep Audios",
+                "keep_sub": "Keep Subtitles",
+                "audio_order": "Audio Order",
+                "sub_order": "Subtitle Order",
                 "default_audio": "Default Audio",
                 "default_sub": "Default Subtitle",
             }
-            await render_stream_list(
-                query, state, action_key, title_map[action_key]
-            )
+            await render_stream_list(query, state, action_key, title_map[action_key])
+            return
 
+        if action in ("reset", "reverse"):
+            action_key = parts[2] + "_" + parts[3]
+            tracks = _tracks_for(state, action_key)
+            if action == "reset":
+                state[action_key] = []
+            else:
+                all_indices = [track["index"] for track in tracks]
+                state[action_key] = [
+                    idx for idx in all_indices if idx not in state.get(action_key, [])
+                ]
+            title_map = {
+                "remove_audio": "Remove Audio",
+                "remove_sub": "Remove Subtitle",
+            }
+            await render_stream_list(query, state, action_key, title_map.get(action_key, "Remove Stream"))
     except Exception as e:
+        if state.get("completed") and "MESSAGE_ID_INVALID" in str(e).upper():
+            return
         err_msg = f"{type(e).__name__}: {e}"
         LOGGER.error(f"VT callback error: action={action} data={data} - {e}")
         try:

@@ -1,4 +1,5 @@
 from asyncio import sleep
+from pyrogram.enums import ButtonStyle
 
 from .. import task_dict, task_dict_lock, user_data, multi_tags
 from ..core.tg_client import Config
@@ -35,6 +36,20 @@ async def cancel(_, message):
         else:
             task = await get_task_by_gid(gid)
             if task is None:
+                from .batch_task_registry import cancel_batch_controller
+
+                result = await cancel_batch_controller(
+                    gid, user_id, await CustomFilters.sudo("", message)
+                )
+                if result is True:
+                    await send_message(
+                        message,
+                        f"Batch controller <code>{gid}</code> cancelled. No next batch will start.",
+                    )
+                    return
+                if result is False:
+                    await send_message(message, "This task is not for you!")
+                    return
                 await send_message(message, f"GID: <code>{gid}</code> Not Found.")
                 return
     elif reply_to_id := message.reply_to_message_id:
@@ -126,7 +141,7 @@ def create_cancel_buttons(is_sudo, user_id=""):
             buttons.data_button("All Added Tasks", f"canall bot ms {user_id}")
         else:
             buttons.data_button("My Tasks", f"canall user ms {user_id}")
-    buttons.data_button("Close", f"canall close ms {user_id}")
+    buttons.data_button("Close", f"canall close ms {user_id}", style=ButtonStyle.DANGER)
     return buttons.build_menu(2)
 
 
@@ -167,9 +182,13 @@ async def cancel_all_update(_, query):
         await edit_message(message, "Choose tasks to cancel!", button)
     elif data[1] == "ms":
         buttons = button_build.ButtonMaker()
-        buttons.data_button("Yes!", f"canall {data[2]} confirm {user_id}")
+        buttons.data_button(
+            "Yes!", f"canall {data[2]} confirm {user_id}", style=ButtonStyle.SUCCESS
+        )
         buttons.data_button("Back", f"canall back confirm {user_id}")
-        buttons.data_button("Close", f"canall close confirm {user_id}")
+        buttons.data_button(
+            "Close", f"canall close confirm {user_id}", style=ButtonStyle.DANGER
+        )
         button = buttons.build_menu(2)
         await edit_message(
             message, f"Are you sure you want to cancel all {data[2]} tasks", button

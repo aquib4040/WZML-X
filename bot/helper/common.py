@@ -1,5 +1,5 @@
 import re
-from asyncio import gather, sleep
+from asyncio import Event, gather, sleep
 from contextlib import suppress
 from os import path as ospath, walk
 from re import sub
@@ -13,7 +13,6 @@ from pyrogram.enums import ChatAction
 from .. import (
     DOWNLOAD_DIR,
     LOGGER,
-    cores,
     cpu_eater_lock,
     excluded_extensions,
     intervals,
@@ -33,8 +32,10 @@ from .ext_utils.files_utils import (
     is_archive,
     is_archive_split,
     is_first_archive_split,
+    is_supported_archive,
     split_file,
 )
+from .ext_utils.hstream_maintenance import hstream_maintenance
 from .ext_utils.links_utils import (
     is_gdrive_id,
     is_gdrive_link,
@@ -50,6 +51,7 @@ from .ext_utils.media_utils import (
     take_ss,
 )
 from .ext_utils.metadata_utils import MetadataProcessor
+from .ext_utils.performance import get_ffmpeg_cores, get_ffmpeg_threads
 from .mirror_leech_utils.gdrive_utils.list import GoogleDriveList
 from .mirror_leech_utils.rclone_utils.list import RcloneList
 from .mirror_leech_utils.status_utils.ffmpeg_status import FFmpegStatus
@@ -89,6 +91,7 @@ class TaskConfig:
         self.rc_flags = ""
         self.tag = ""
         self.name = ""
+        self.merge_source_name = ""
         self.subname = ""
         self.name_swap = ""
         self.thumbnail_layout = ""
@@ -135,6 +138,7 @@ class TaskConfig:
         self.is_file = False
         self.bot_trans = False
         self.user_trans = False
+        self._relax_upload_chat_permissions = False
         self.progress = True
         self.ffmpeg_cmds = None
         self.metadata_title = None
@@ -153,6 +157,11 @@ class TaskConfig:
         self.pm_msg = None
         self.file_details = {}
         self.mode = tuple()
+        self._multi_step_done = Event()
+
+    def mark_multi_step_done(self):
+        if not self._multi_step_done.is_set():
+            self._multi_step_done.set()
 
     def _set_mode_engine(self):
         self.source_url = (
@@ -213,6 +222,11 @@ class TaskConfig:
                 raise ValueError(f"NO TOKEN! {token_path} not Exists!")
 
     async def before_start(self):
+        if hstream_maintenance.blocks_tasks():
+            raise ValueError(
+                "Owner Hstream maintenance is active. New download and upload "
+                "tasks will resume when it finishes."
+            )
         self.name_swap = (
             self.name_swap
             or self.user_dict.get("NAME_SWAP", False)
@@ -329,6 +343,9 @@ class TaskConfig:
                             or Config.PIXELDRAIN_KEY
                         ):
                             raise ValueError("No PixelDrain Key Found!")
+                    elif service == "vikingfile":
+                        # VikingFile supports anonymous uploads when no hash is set.
+                        continue
                 self.up_dest = "Uphoster"
 
             if not self.up_dest:
@@ -391,8 +408,44 @@ class TaskConfig:
                 ) != self.get_config_path(self.up_dest):
                     raise ValueError("You must use the same config to clone!")
         else:
-            self.leech_dest = self.up_dest or self.user_dict.get("LEECH_DUMP_CHAT")
-            self.up_dest = Config.LEECH_DUMP_CHAT
+            rss_chat = str(Config.RSS_CHAT or "").split("|", 1)[0]
+            is_rss_chat_task = (
+                self.is_leech
+                and rss_chat
+                and str(getattr(self.message.chat, "id", "")) == rss_chat
+            )
+            is_chat_dump_task = (
+                self.is_leech
+                and self.up_dest
+                and self.is_super_chat
+                and not self.is_clone
+            )
+            rss_dump_chat = (
+                getattr(self.message, "_rss_dump_chat", None)
+                or (Config.RSS_CHAT if is_rss_chat_task else None)
+                or Config.RSS_CHAT
+            )
+            if (
+                getattr(self, "rss_auto_leech", False) or is_rss_chat_task
+            ) and rss_dump_chat:
+                self.leech_dest = self.up_dest or ""
+                self.up_dest = rss_dump_chat
+                self.bot_trans = True
+                self.user_trans = False
+                self._relax_upload_chat_permissions = True
+            elif is_chat_dump_task:
+                self.leech_dest = self.up_dest
+                self.up_dest = f"{self.message.chat.id}"
+                if getattr(self.message, "topic_message", False):
+                    self.up_dest += f"|{self.message.message_thread_id}"
+                self.bot_trans = True
+                self.user_trans = False
+                self._relax_upload_chat_permissions = True
+            else:
+                self.leech_dest = self.up_dest or self.user_dict.get(
+                    "LEECH_DUMP_CHAT"
+                )
+                self.up_dest = Config.LEECH_DUMP_CHAT
             self.hybrid_leech = TgClient.IS_PREMIUM_USER and (
                 self.user_dict.get("HYBRID_LEECH")
                 or Config.HYBRID_LEECH
@@ -474,9 +527,19 @@ class TaskConfig:
                             "FORUM",
                         ]:
                             member = await chat.get_member(uploader_id)
+                            privileges = member.privileges
+                            can_manage = bool(
+                                getattr(privileges, "can_manage_chat", False)
+                            )
+                            can_delete = bool(
+                                getattr(privileges, "can_delete_messages", False)
+                            )
                             if (
-                                not member.privileges.can_manage_chat
-                                or not member.privileges.can_delete_messages
+                                not can_manage
+                                or (
+                                    not can_delete
+                                    and not self._relax_upload_chat_permissions
+                                )
                             ):
                                 if not self.user_transmission:
                                     raise ValueError(
@@ -571,7 +634,10 @@ class TaskConfig:
 
     @new_task
     async def run_multi(self, input_list, obj):
-        await sleep(7)
+        # A normal -i chain advances only after this item has completely
+        # downloaded and uploaded (or failed). Shared-folder jobs signal after
+        # their current download is moved into the common workspace.
+        await self._multi_step_done.wait()
         if not self.multi_tag and self.multi > 1:
             self.multi_tag = token_hex(3)
             multi_tags.add(self.multi_tag)
@@ -683,17 +749,13 @@ class TaskConfig:
     async def proceed_extract(self, dl_path, gid):
         pswd = self.extract if isinstance(self.extract, str) else ""
         self.files_to_proceed = []
-        if self.is_file and is_archive(dl_path):
+        if self.is_file and await is_supported_archive(dl_path):
             self.files_to_proceed.append(dl_path)
         else:
             for dirpath, _, files in await sync_to_async(walk, dl_path, topdown=False):
                 for file_ in files:
-                    if (
-                        is_first_archive_split(file_)
-                        or is_archive(file_)
-                        and not file_.strip().lower().endswith(".rar")
-                    ):
-                        f_path = ospath.join(dirpath, file_)
+                    f_path = ospath.join(dirpath, file_)
+                    if await is_supported_archive(f_path):
                         self.files_to_proceed.append(f_path)
 
         if not self.files_to_proceed:
@@ -709,14 +771,16 @@ class TaskConfig:
             for file_ in files:
                 if self.is_cancelled:
                     return False
-                if (
-                    is_first_archive_split(file_)
-                    or is_archive(file_)
-                    and not file_.strip().lower().endswith(".rar")
-                ):
+                f_path = ospath.join(dirpath, file_)
+                if await is_supported_archive(f_path):
                     self.proceed_count += 1
-                    f_path = ospath.join(dirpath, file_)
-                    t_path = get_base_name(f_path) if self.is_file else dirpath
+                    if self.is_file:
+                        try:
+                            t_path = get_base_name(f_path)
+                        except Exception:
+                            t_path = f"{f_path}_extracted"
+                    else:
+                        t_path = dirpath
                     if not self.is_file:
                         self.subname = file_
                     code = await sevenz.extract(f_path, t_path, pswd)
@@ -733,25 +797,35 @@ class TaskConfig:
         return t_path if self.is_file and code == 0 else dl_path
 
     async def proceed_ffmpeg(self, dl_path, gid):
+        if not await aiopath.exists(dl_path):
+            LOGGER.error(f"FFmpeg input path missing: {dl_path}")
+            await send_message(
+                self.message,
+                f"Download path missing: <code>{dl_path}</code>\n"
+                "The task was cleaned or cancelled before FFmpeg could run.",
+            )
+            self.is_cancelled = True
+            return False
         checked = False
         cmds = [
             [part.strip() for part in split(item) if part.strip()]
             for item in self.ffmpeg_cmds
         ]
-        # Codec flags that specify encoding
-        _CODEC_FLAGS = {
-            "-c", "-c:v", "-c:a", "-c:s",
-            "-vcodec", "-acodec", "-scodec", "-codec",
-            "-codec:v", "-codec:a", "-codec:s",
-        }
         try:
             ffmpeg = FFMpeg(self)
             for ffmpeg_cmd in cmds:
                 self.proceed_count = 0
+                if "-threads" in ffmpeg_cmd:
+                    thread_index = ffmpeg_cmd.index("-threads")
+                    if (
+                        len(ffmpeg_cmd) > thread_index + 1
+                        and ffmpeg_cmd[thread_index + 1].lower() in {"0", "auto"}
+                    ):
+                        ffmpeg_cmd[thread_index + 1] = str(get_ffmpeg_threads())
                 cmd = [
                     "taskset",
                     "-c",
-                    f"{cores}",
+                    get_ffmpeg_cores(),
                     BinConfig.FFMPEG_NAME,
                     "-hide_banner",
                     "-loglevel",
@@ -760,24 +834,6 @@ class TaskConfig:
                     "pipe:1",
                 ] + ffmpeg_cmd
 
-                # Block encoding: only allow -c copy variants
-                has_encoding = False
-                for i, arg in enumerate(cmd):
-                    if arg in _CODEC_FLAGS and i + 1 < len(cmd):
-                        codec_val = cmd[i + 1].lower()
-                        if codec_val != "copy":
-                            has_encoding = True
-                            LOGGER.warning(
-                                f"Blocked FFmpeg encoding codec: "
-                                f"{arg} {cmd[i + 1]}"
-                            )
-                            break
-                if has_encoding:
-                    LOGGER.info(
-                        "Skipping FFmpeg cmd: encoding not allowed, "
-                        "only -c copy is permitted"
-                    )
-                    continue
                 if "-del" in cmd:
                     cmd.remove("-del")
                     delete_files = True

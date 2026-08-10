@@ -7,11 +7,16 @@ from asyncio import (
 from asyncio.subprocess import PIPE
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial, wraps
+from hashlib import sha256
+from hmac import new as hmac_new
+from secrets import token_bytes
 
 from httpx import AsyncClient
+from pyrogram.handlers import MessageHandler
 
-from ... import bot_loop, user_data
+from ... import LOGGER, bot_loop, user_data
 from ...core.config_manager import Config
+from .db_handler import database
 from ..telegram_helper.button_build import ButtonMaker
 from .help_messages import (
     CLONE_HELP_DICT,
@@ -21,8 +26,34 @@ from .help_messages import (
 from .telegraph_helper import telegraph
 
 COMMAND_USAGE = {}
+BACKGROUND_TASKS = set()
 
 THREAD_POOL = ThreadPoolExecutor(max_workers=500)
+_SERVICE_PWD_SALT = b"wzmlx_v3_service_pwd_salt"
+_cached_secret_bytes = None
+
+
+def _shared_secret():
+    global _cached_secret_bytes
+    secret = Config.WEB_ACCESS_PASSWORD
+    if not secret:
+        if _cached_secret_bytes is None:
+            _cached_secret_bytes = token_bytes(32)
+        return _cached_secret_bytes
+    return secret.encode("utf-8") if isinstance(secret, str) else secret
+
+
+def derive_service_password(bot_id, service):
+    if not bot_id:
+        bot_id = "0"
+    digest = hmac_new(
+        _SERVICE_PWD_SALT,
+        f"{bot_id}:{service}".encode("utf-8"),
+        sha256,
+    )
+    digest.update(_shared_secret())
+    raw = digest.hexdigest()
+    return raw[:20] + raw[-4:]
 
 
 class SetInterval:
@@ -84,7 +115,13 @@ def create_help_buttons():
 
 
 def compare_versions(v1, v2):
-    v1, v2 = (list(map(int, v.split("-")[0][1:].split("."))) for v in (v1, v2))
+    try:
+        v1, v2 = (
+            list(map(int, str(v).split("-")[0].lstrip("vV").split(".")))
+            for v in (v1, v2)
+        )
+    except (TypeError, ValueError):
+        return "Version comparison unavailable"
     return (
         "New Version Update is Available! Check Now!"
         if v1 < v2
@@ -98,7 +135,7 @@ def compare_versions(v1, v2):
 
 def bt_selection_buttons(id_):
     gid = id_[:12] if len(id_) > 25 else id_
-    pin = "".join([n for n in id_ if n.isdigit()][:4])
+    pin = _selector_pin(id_)
     buttons = ButtonMaker()
     if Config.WEB_PINCODE:
         buttons.url_button("Select Files", f"{Config.BASE_URL}/app/files?gid={id_}")
@@ -110,6 +147,35 @@ def bt_selection_buttons(id_):
     buttons.data_button("Done Selecting", f"sel done {gid} {id_}")
     buttons.data_button("Cancel", f"sel cancel {gid}")
     return buttons.build_menu(2)
+
+
+def mega_selection_buttons(id_):
+    pin = _selector_pin(id_)
+    gid = id_
+    buttons = ButtonMaker()
+    base = f"{Config.BASE_URL}/app/files?gid={id_}&type=mega"
+    if Config.WEB_PINCODE:
+        buttons.url_button("Select MEGA Files", base)
+        buttons.data_button("Pincode", f"sel pin {gid} {pin}")
+    else:
+        buttons.url_button("Select MEGA Files", f"{base}&pin={pin}")
+    buttons.data_button("Done Selecting", f"sel done {gid} {id_}")
+    buttons.data_button("Cancel", f"sel cancel {gid}")
+    return buttons.build_menu(2)
+
+
+def _selector_pin(gid):
+    from hashlib import sha256
+    from hmac import new as hmac_new
+
+    bot_id = str(Config.BOT_TOKEN or "").split(":", 1)[0]
+    signature = hmac_new(
+        b"wzmlx_v3_pin_salt",
+        f"{gid}|{bot_id}".encode(),
+        sha256,
+    ).hexdigest()
+    digits = "".join(char for char in signature if char.isdigit())[:4]
+    return (digits + signature).ljust(4, "0")[:4]
 
 
 async def get_telegraph_list(telegraph_content):
@@ -243,6 +309,19 @@ def get_size_bytes(size):
     return size
 
 
+def handleIndex(index, lst):
+    if not lst:
+        return 0
+    return index % len(lst)
+
+
+def fetch_drive_cat(user_id, force=False):
+    user_dict = user_data.get(user_id, {})
+    if (Config.DRIVE_CATEGORY_MODE and user_dict.get("drive_cat_mode", False)) or force:
+        return user_dict.get("DRIVE_CAT", {})
+    return {}
+
+
 async def get_content_type(url):
     try:
         async with AsyncClient() as client:
@@ -275,9 +354,43 @@ async def cmd_exec(cmd, shell=False):
 
 
 def new_task(func):
+    async def _notify_error(update, error):
+        try:
+            from ..telegram_helper.message_utils import send_message
+
+            target = getattr(update, "message", None) or update
+            if target is not None:
+                await send_message(
+                    target,
+                    f"<b>Command failed:</b>\n<code>{str(error)[:1000]}</code>",
+                )
+        except Exception:
+            LOGGER.error("Failed to notify command error", exc_info=True)
+
+    def _log_task_result(task, update):
+        BACKGROUND_TASKS.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except Exception as e:
+            error = e
+        if error is None:
+            return
+        LOGGER.error(
+            f"Command task failed in {func.__name__}: {error}",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        notify_task = bot_loop.create_task(_notify_error(update, error))
+        BACKGROUND_TASKS.add(notify_task)
+        notify_task.add_done_callback(BACKGROUND_TASKS.discard)
+
     @wraps(func)
     async def wrapper(*args, **kwargs):
         task = bot_loop.create_task(func(*args, **kwargs))
+        BACKGROUND_TASKS.add(task)
+        update = args[1] if len(args) > 1 else None
+        task.add_done_callback(lambda done: _log_task_result(done, update))
         return task
 
     return wrapper
@@ -308,3 +421,46 @@ def safe_int(value, default=0):
         return int(value)
     except (ValueError, TypeError):
         return default
+
+
+async def search_images():
+    if not Config.USE_IMAGES:
+        return
+    try:
+        if Config.DATABASE_URL:
+            await database.update_config({"IMAGES": Config.IMAGES})
+    except Exception as e:
+        LOGGER.warning(f"search_images skipped: {e}")
+
+
+def _find_command_filters(flt):
+    if hasattr(flt, "commands"):
+        yield flt
+    for attr in ("base", "other"):
+        if child := getattr(flt, attr, None):
+            yield from _find_command_filters(child)
+
+
+def _build_command_map():
+    from ...core.tg_client import TgClient
+
+    mapping = {}
+    for group in TgClient.bot.dispatcher.groups.values():
+        for handler in group:
+            if not isinstance(handler, MessageHandler) or handler.filters is None:
+                continue
+            for cmd_filter in _find_command_filters(handler.filters):
+                for cmd in cmd_filter.commands:
+                    mapping[cmd] = handler.callback
+    return mapping
+
+
+def resolve_command(command_str):
+    cmd_name = command_str.strip().lstrip("/").split(maxsplit=1)[0]
+    mapping = _build_command_map()
+    handler = mapping.get(cmd_name)
+    if handler is None and Config.CMD_SUFFIX:
+        handler = mapping.get(cmd_name + Config.CMD_SUFFIX)
+    if handler is None:
+        LOGGER.warning(f"Unknown command '{cmd_name}' (from '{command_str}')")
+    return handler

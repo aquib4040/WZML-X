@@ -1,9 +1,11 @@
 from asyncio import gather, sleep, wait_for, TimeoutError
+from pyrogram.enums import ButtonStyle
 from platform import platform, version
 from re import search as research
 from time import time
 
 from aiofiles.os import path as aiopath
+from httpx import AsyncClient
 from psutil import (
     Process,
     boot_time,
@@ -23,6 +25,7 @@ from psutil import (
 
 from .. import LOGGER, bot_cache, bot_start_time, bot_loop
 from ..core.config_manager import Config, BinConfig
+from ..helper.ext_utils.bot_lock import get_system_resources_cached
 from ..helper.ext_utils.bot_utils import cmd_exec, compare_versions, new_task
 from ..helper.ext_utils.status_utils import (
     get_progress_bar_string,
@@ -56,8 +59,46 @@ commands = {
     "aiohttp": (["uv", "pip", "show", "aiohttp"], r"Version: ([\d.]+)"),
     "pyrotgfork": (["uv", "pip", "show", "pyrotgfork"], r"Version: ([\d.]+)"),
     "gapi": (["uv", "pip", "show", "google-api-python-client"], r"Version: ([\d.]+)"),
-    "mega": (["mega-version"], r"version: ([\d.]+)"),
+    "mega": (
+        [
+            "python3",
+            "-c",
+            "from mega import MegaApi; print(MegaApi('test').getVersion())",
+        ],
+        r"v?([\d.]+)",
+    ),
 }
+
+
+async def _remote_repo_version():
+    repo = str(getattr(Config, "UPSTREAM_REPO", "") or "").strip()
+    if not repo and await aiopath.exists(".git"):
+        repo = (await cmd_exec(["git", "remote", "get-url", "origin"]))[0].strip()
+    branch = str(getattr(Config, "UPSTREAM_BRANCH", "") or "master").strip()
+    if repo.startswith("git@github.com:"):
+        repo = "https://github.com/" + repo.split(":", 1)[1]
+    repo = repo.removesuffix(".git").rstrip("/")
+    if "github.com/" not in repo:
+        return None
+    slug = repo.split("github.com/", 1)[1]
+    url = f"https://raw.githubusercontent.com/{slug}/{branch}/bot/version.py"
+    try:
+        async with AsyncClient(timeout=10, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+        values = {
+            key: research(rf'{key}\s*=\s*["\']([^"\']+)', response.text)
+            for key in ("MAJOR", "MINOR", "PATCH", "STATE")
+        }
+        if all(values[key] for key in ("MAJOR", "MINOR", "PATCH")):
+            state = values["STATE"].group(1) if values["STATE"] else ""
+            suffix = f"-{state}" if state else ""
+            return "v" + ".".join(values[key].group(1) for key in ("MAJOR", "MINOR", "PATCH")) + suffix
+        direct = research(r'v\d+(?:\.\d+){2}(?:-[\w.]+)?', response.text)
+        return direct.group(0) if direct else None
+    except Exception as error:
+        LOGGER.warning(f"Repo version lookup failed: {error}")
+        return None
 
 
 async def get_stats(event, key="home"):
@@ -77,10 +118,29 @@ async def get_stats(event, key="home"):
         swap = swap_memory()
         memory = virtual_memory()
         disk_io = disk_io_counters()
+        res = get_system_resources_cached()
+        bot_ram_mb = res["ram_mb"]
+        bot_ram_total = bot_ram_mb * 1024 * 1024
+        user = Process().username()
+        bot_ram_used = sum(
+            p.memory_info().rss for p in process_iter() if p.username() == user
+        )
+        bot_ram_free = max(0, bot_ram_total - bot_ram_used)
+        bot_ram_pct = (
+            round((bot_ram_used / bot_ram_total * 100), 2) if bot_ram_total > 0 else 0
+        )
+        instance_cpu = res["cpu_count"]
+        sys_cpu = cpu_count(logical=True)
+        p_cores = cpu_count(logical=False)
+        v_cores = (sys_cpu or 0) - (p_cores or 0)
         msg = f"""⌬ <b><i>BOT STATISTICS :</i></b>
 ┖ <b>Bot Uptime :</b> {get_readable_time(time() - bot_start_time)}
 
-┎ <b><i>RAM ( MEMORY ) :</i></b>
+┎ <b><i>INSTANCE RAM ( BOT ) :</i></b>
+┃ {get_progress_bar_string(bot_ram_pct)} {bot_ram_pct}%
+┖ <b>U :</b> {get_readable_file_size(bot_ram_used)} | <b>F :</b> {get_readable_file_size(bot_ram_free)} | <b>T :</b> {get_readable_file_size(bot_ram_total)}
+
+┎ <b><i>SYSTEM RAM :</i></b>
 ┃ {get_progress_bar_string(memory.percent)} {memory.percent}%
 ┖ <b>U :</b> {get_readable_file_size(memory.used)} | <b>F :</b> {get_readable_file_size(memory.available)} | <b>T :</b> {get_readable_file_size(memory.total)}
 
@@ -88,7 +148,12 @@ async def get_stats(event, key="home"):
 ┃ {get_progress_bar_string(swap.percent)} {swap.percent}%
 ┖ <b>U :</b> {get_readable_file_size(swap.used)} | <b>F :</b> {get_readable_file_size(swap.free)} | <b>T :</b> {get_readable_file_size(swap.total)}
 
-┎ <b><i>DISK :</i></b>
+┎ <b><i>INSTANCE CPU ( BOT ) :</i></b>
+┃ <b>Instance Core(s) :</b> {instance_cpu}
+┠ <b>Total Core(s) :</b> {sys_cpu} | <b>P-Core(s) :</b> {p_cores} | <b>V-Core(s) :</b> {v_cores}
+┖ <b>Usable CPU(s) :</b> {len(Process().cpu_affinity())}
+
+┎ <b><i>SYSTEM DISK :</i></b>
 ┃ {get_progress_bar_string(disk)} {disk}%
 ┃ <b>Total Disk Read :</b> {f"{get_readable_file_size(disk_io.read_bytes)} ({get_readable_time(disk_io.read_time / 1000)})" if disk_io else "Access Denied"}
 ┃ <b>Total Disk Write :</b> {f"{get_readable_file_size(disk_io.write_bytes)} ({get_readable_time(disk_io.write_time / 1000)})" if disk_io else "Access Denied"}
@@ -96,24 +161,27 @@ async def get_stats(event, key="home"):
 """
     elif key == "stsys":
         cpu_usage = cpu_percent(interval=0.5)
-        msg = f"""⌬ <b><i>OS SYSTEM :</i></b>
-┟ <b>OS Uptime :</b> {get_readable_time(time() - boot_time())}
+        sys_cpu = cpu_count(logical=True)
+        p_cores = cpu_count(logical=False)
+        v_cores = (sys_cpu or 0) - (p_cores or 0)
+        msg = f"""⌬ <b><i>SYSTEM OS :</i></b>
+╟ <b>OS Uptime :</b> {get_readable_time(time() - boot_time())}
 ┠ <b>OS Version :</b> {version()}
 ┖ <b>OS Arch :</b> {platform()}
 
-⌬ <b><i>NETWORK STATS :</i></b>
-┟ <b>Upload Data:</b> {get_readable_file_size(net_io_counters().bytes_sent)}
+⌬ <b><i>SYSTEM NETWORK :</i></b>
+╟ <b>Upload Data:</b> {get_readable_file_size(net_io_counters().bytes_sent)}
 ┠ <b>Download Data:</b> {get_readable_file_size(net_io_counters().bytes_recv)}
 ┠ <b>Pkts Sent:</b> {str(net_io_counters().packets_sent)[:-3]}k
 ┠ <b>Pkts Received:</b> {str(net_io_counters().packets_recv)[:-3]}k
 ┖ <b>Total I/O Data:</b> {get_readable_file_size(net_io_counters().bytes_recv + net_io_counters().bytes_sent)}
 
-┎ <b>CPU :</b>
+┎ <b><i>SYSTEM CPU :</i></b>
 ┃ {get_progress_bar_string(cpu_usage)} {cpu_usage}%
 ┠ <b>CPU Frequency :</b> {f"{cpu_freq().current / 1000:.2f} GHz" if cpu_freq() else "Access Denied"}
-┠ <b>System Avg Load :</b> {"%, ".join(str(round((x / cpu_count() * 100), 2)) for x in getloadavg())}%, (1m, 5m, 15m)
-┠ <b>P-Core(s) :</b> {cpu_count(logical=False)} | <b>V-Core(s) :</b> {cpu_count(logical=True) - cpu_count(logical=False)}
-┠ <b>Total Core(s) :</b> {cpu_count(logical=True)}
+┠ <b>System Avg Load :</b> {"%, ".join(str(round((x / (cpu_count() or 1) * 100), 2)) for x in getloadavg())}%, (1m, 5m, 15m)
+┠ <b>P-Core(s) :</b> {p_cores} | <b>V-Core(s) :</b> {v_cores}
+┠ <b>Total Core(s) :</b> {sys_cpu}
 ┖ <b>Usable CPU(s) :</b> {len(Process().cpu_affinity())}
 """
     elif key == "strepo":
@@ -130,37 +198,38 @@ async def get_stats(event, key="home"):
                     "git log -1 --pretty=format:'<code>%s</code> <b>By</b> %an'", True
                 )
             )[0]
-        official_v = (
-            await cmd_exec(
-                f"curl -o latestversion.py https://raw.githubusercontent.com/SilentDemonSD/WZML-X/{Config.UPSTREAM_BRANCH}/bot/version.py -s && python3 latestversion.py && rm latestversion.py",
-                True,
-            )
-        )[0]
+        official_v = await _remote_repo_version()
+        latest_label = official_v or "Unavailable"
+        remarks = (
+            compare_versions(get_version(), official_v)
+            if official_v
+            else "Remote version is unavailable; try again later."
+        )
         msg = f"""⌬ <b><i>Repo Statistics :</i></b>
 │
 ┟ <b>Bot Updated :</b> {last_commit}
 ┠ <b>Current Version :</b> {get_version()}
-┠ <b>Latest Version :</b> {official_v}
+┠ <b>Latest Version :</b> {latest_label}
 ┖ <b>Last ChangeLog :</b> {changelog}
 
-⌬ <b>REMARKS :</b> <code>{compare_versions(get_version(), official_v)}</code>
+⌬ <b>REMARKS :</b> <code>{remarks}</code>
     """
     elif key == "stpkgs":
         ver = bot_cache.get("eng_versions", {})
         msg = f"""⌬ <b><i>Packages Statistics :</i></b>
 │
-┟ <b>python:</b> {ver.get("python", "N/A")}
-┠ <b>aria2:</b> {ver.get("aria2", "N/A")}
-┠ <b>qBittorrent:</b> {ver.get("qBittorrent", "N/A")}
-┠ <b>SABnzbd+:</b> {ver.get("SABnzbd+", "N/A")}
-┠ <b>rclone:</b> {ver.get("rclone", "N/A")}
-┠ <b>yt-dlp:</b> {ver.get("yt-dlp", "N/A")}
-┠ <b>ffmpeg:</b> {ver.get("ffmpeg", "N/A")}
-┠ <b>7z:</b> {ver.get("7z", "N/A")}
-┠ <b>Aiohttp:</b> {ver.get("aiohttp", "N/A")}
-┠ <b>PyroTgFork:</b> {ver.get("pyrotgfork", "N/A")}
-┠ <b>Google API:</b> {ver.get("gapi", "N/A")}
-┖ <b>Mega CMD:</b> {ver.get("mega", "N/A")}
+┟ <b>python:</b> v{ver.get("python", "N/A")}
+┠ <b>aria2:</b> v{ver.get("aria2", "N/A")}
+┠ <b>qBittorrent:</b> v{ver.get("qBittorrent", "N/A")}
+┠ <b>SABnzbd+:</b> v{ver.get("SABnzbd+", "N/A")}
+┠ <b>rclone:</b> v{ver.get("rclone", "N/A")}
+┠ <b>yt-dlp:</b> v{ver.get("yt-dlp", "N/A")}
+┠ <b>ffmpeg:</b> v{ver.get("ffmpeg", "N/A")}
+┠ <b>7z:</b> v{ver.get("7z", "N/A")}
+┠ <b>Aiohttp:</b> v{ver.get("aiohttp", "N/A")}
+┠ <b>PyroTgFork:</b> v{ver.get("pyrotgfork", "N/A")}
+┠ <b>Google API:</b> v{ver.get("gapi", "N/A")}
+┖ <b>MegaSDK:</b> v{ver.get("mega", "N/A")}
 """
     elif key == "tlimits":
         msg = f"""⌬ <b><i>Bot Task Limits :</i></b>
@@ -226,14 +295,16 @@ async def get_stats(event, key="home"):
         btns.data_button("🔄 Refresh", f"stats {user_id} systasks", "header")
 
     btns.data_button("Back", f"stats {user_id} home", "footer")
-    btns.data_button("Close", f"stats {user_id} close", "footer")
+    btns.data_button(
+        "Close", f"stats {user_id} close", "footer", style=ButtonStyle.DANGER
+    )
     return msg, btns.build_menu(8 if key == "systasks" else 2)
 
 
 @new_task
 async def bot_stats(_, message):
     msg, btns = await get_stats(message)
-    await send_message(message, msg, btns)
+    await send_message(message, msg, btns, photo="IMAGES")
 
 
 @new_task
@@ -247,7 +318,7 @@ async def stats_pages(_, query):
         await query.answer()
         await delete_message(message, message.reply_to_message)
     elif data[2] == "killproc":
-        if data[2] == "systasks" and not await CustomFilters.owner(_, query):
+        if not await CustomFilters.owner(_, query):
             await query.answer("Sorry! You cannot Kill System Tasks!", show_alert=True)
             return
         pid = int(data[3])
@@ -303,9 +374,9 @@ async def retry_mega_version():
     version = await get_version_async(command, regex, timeout=10)
     if version != "Timeout" and not version.startswith("Exception"):
         bot_cache["eng_versions"]["mega"] = version
-        LOGGER.info(f"MegaCMD Version Fetched: {version}")
+        LOGGER.info(f"MegaSDK Version Fetched: {version}")
     else:
-        LOGGER.warning(f"Failed to fetch MegaCMD Version: {version}")
+        LOGGER.warning(f"Failed to fetch MegaSDK Version: {version}")
 
 
 @new_task

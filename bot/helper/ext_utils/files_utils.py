@@ -4,11 +4,12 @@ from asyncio.subprocess import PIPE
 from contextlib import suppress
 from psutil import disk_usage
 from os import path as ospath, readlink, walk
-from re import I, escape, search as re_search, split as re_split
+from re import I, escape, search as re_search, split as re_split, sub as re_sub
 
 from aiofiles.os import (
     listdir,
     remove,
+    rename,
     rmdir,
     symlink,
     makedirs as aiomakedirs,
@@ -94,7 +95,7 @@ FIRST_SPLIT_REGEX = (
     r"\.part0*1\.rar$|\.7z\.0*1$|\.zip\.0*1$|^(?!.*\.part\d+\.rar$).*\.rar$"
 )
 
-SPLIT_REGEX = r"\.r\d+$|\.7z\.\d+$|\.z\d+$|\.zip\.\d+$|\.part\d+\.rar$"
+SPLIT_REGEX = r"\.\w+\.\d{3}$|\.r\d+$|\.7z\.\d+$|\.z\d+$|\.zip\.\d+$|\.part\d+\.rar$"
 
 
 def is_first_archive_split(file):
@@ -107,6 +108,124 @@ def is_archive(file):
 
 def is_archive_split(file):
     return bool(re_search(SPLIT_REGEX, file.lower(), I))
+
+
+async def is_supported_archive(file):
+    if is_first_archive_split(file) or is_archive(file):
+        return True
+    if is_archive_split(file) or not await aiopath.isfile(file):
+        return False
+
+    archive_mimes = {
+        "application/gzip",
+        "application/java-archive",
+        "application/vnd.rar",
+        "application/x-7z-compressed",
+        "application/x-bzip2",
+        "application/x-gzip",
+        "application/x-lzma",
+        "application/x-rar",
+        "application/x-rar-compressed",
+        "application/x-tar",
+        "application/x-xz",
+        "application/zip",
+    }
+    try:
+        mime = await sync_to_async(Magic(mime=True).from_file, file)
+        return mime in archive_mimes
+    except Exception:
+        return False
+
+
+async def is_video_file(file):
+    if not await aiopath.isfile(file):
+        return False
+    try:
+        result = await cmd_exec(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                file,
+            ]
+        )
+        return result[2] == 0 and "video" in (result[0] or "").lower()
+    except Exception:
+        return False
+
+
+async def ensure_media_extension(file):
+    if not await aiopath.isfile(file):
+        return file
+    if ospath.splitext(file)[1]:
+        return file
+    if not await is_video_file(file):
+        return file
+    target = f"{file}.mkv"
+    if await aiopath.exists(target):
+        await remove(target)
+    await rename(file, target)
+    LOGGER.info(f"No-extension media detected. Renamed to: {target}")
+    return target
+
+
+def _split_join_target(name):
+    lower = name.lower()
+    if re_search(r"\.zip\.0*1$", lower):
+        return re_sub(r"\.0*1$", "", name, flags=I)
+    if re_search(r"\.0*1$", lower):
+        return re_sub(r"\.0*1$", "", name, flags=I)
+    return ""
+
+
+async def join_split_zip_files(opath):
+    if not await aiopath.isdir(opath):
+        return []
+    files = await listdir(opath)
+    groups = {}
+    for file_ in files:
+        lower = file_.lower()
+        if not re_search(r"(?:\.zip)?\.\d{3}$", lower):
+            continue
+        base = _split_join_target(file_) or file_.rsplit(".", 1)[0]
+        groups.setdefault(base, []).append(file_)
+
+    joined = []
+    for base, parts in groups.items():
+        if len(parts) < 2 or not any(re_search(r"\.0*1$", part.lower()) for part in parts):
+            continue
+        parts.sort(key=lambda item: int(item.rsplit(".", 1)[1]))
+        target = ospath.join(opath, base)
+        LOGGER.info(f"Joining multipart archive: {base} from {len(parts)} part(s)")
+        if await aiopath.exists(target):
+            await remove(target)
+        try:
+            await sync_to_async(_join_files_blocking, target, [ospath.join(opath, part) for part in parts])
+        except Exception as e:
+            LOGGER.error(f"Failed to join multipart archive {base}: {e}")
+            if await aiopath.exists(target):
+                await remove(target)
+            continue
+        joined.append(target)
+        for part in parts:
+            with suppress(Exception):
+                await remove(ospath.join(opath, part))
+    return joined
+
+
+def _join_files_blocking(target, parts):
+    with open(target, "wb") as out:
+        for part in parts:
+            with open(part, "rb") as src:
+                while chunk := src.read(1024 * 1024):
+                    out.write(chunk)
 
 
 async def clean_target(opath):
@@ -188,6 +307,26 @@ def get_base_name(orig_path):
         return re_split(f"{extension}$", orig_path, maxsplit=1, flags=I)[0]
     else:
         raise NotSupportedExtractionArchive("File format not supported for extraction")
+
+
+def get_source_container_name(name):
+    value = ospath.basename(str(name or "").rstrip("/\\")).strip()
+    if not value:
+        return ""
+    value = re_sub(r"\.\!qB$", "", value, flags=I)
+    value = re_sub(
+        r"\.(?:zip|7z)\.\d+$",
+        lambda match: match[0].rsplit(".", 1)[0],
+        value,
+        flags=I,
+    )
+    value = re_sub(r"\.part\d+\.rar$", ".rar", value, flags=I)
+    value = re_sub(r"\.r\d+$", "", value, flags=I)
+    for extension in sorted(ARCH_EXT, key=len, reverse=True):
+        if value.lower().endswith(extension):
+            value = value[: -len(extension)]
+            break
+    return re_sub(r'[\\/:*?"<>|]+', " ", value).strip(" .-")
 
 
 async def create_recursive_symlink(source, destination):
@@ -275,13 +414,17 @@ async def join_files(opath):
 
 
 async def split_file(f_path, split_size, listener):
-    out_path = f"{f_path}."
+    base_name, ext = ospath.splitext(f_path)
+    out_path = f"{base_name}.part"
+    suffix_args = [f"--additional-suffix={ext}"] if ext else []
     if listener.is_cancelled:
         return False
+    # pread parallel split
     listener.subproc = await create_subprocess_exec(
         "split",
         "--numeric-suffixes=1",
-        "--suffix-length=3",
+        "--suffix-length=2",
+        *suffix_args,
         f"--bytes={split_size}",
         f_path,
         out_path,
@@ -410,6 +553,7 @@ class SevenZ:
             f"-v{split_size}b",
             "a",
             "-mx=0",
+            "-mmt=on",
             f"-p{pswd}",
             up_path,
             dl_path,
@@ -419,12 +563,12 @@ class SevenZ:
         ]
         if self._listener.is_leech and int(size) > self._listener.split_size:
             if not pswd:
-                del cmd[4]
+                del cmd[5]
             LOGGER.info(f"Zip: orig_path: {dl_path}, zip_path: {up_path}.0*")
         else:
             del cmd[1]
             if not pswd:
-                del cmd[3]
+                del cmd[4]
             LOGGER.info(f"Zip: orig_path: {dl_path}, zip_path: {up_path}")
         if self._listener.is_cancelled:
             return False

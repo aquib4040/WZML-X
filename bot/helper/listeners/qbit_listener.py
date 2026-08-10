@@ -17,13 +17,17 @@ from ...core.torrent_manager import TorrentManager
 from ..ext_utils.bot_utils import new_task
 from ..ext_utils.files_utils import clean_unwanted
 from ..ext_utils.status_utils import get_readable_time, get_task_by_gid
-from ..ext_utils.task_manager import stop_duplicate_check, limit_checker
+from ..ext_utils.task_manager import (
+    limit_checker,
+    release_small_queued_task,
+    stop_duplicate_check,
+)
 from ..mirror_leech_utils.status_utils.qbit_status import QbittorrentStatus
 from ..telegram_helper.message_utils import update_status_message
 
 
-async def _remove_torrent(hash_, tag):
-    await TorrentManager.qbittorrent.torrents.delete([hash_], True)
+async def _remove_torrent(hash_, tag, delete_files=True):
+    await TorrentManager.qbittorrent.torrents.delete([hash_], delete_files)
     async with qb_listener_lock:
         if tag in qb_torrents:
             del qb_torrents[tag]
@@ -67,6 +71,7 @@ async def _stop_duplicate(tor):
 async def _size_check(tor):
     if task := await get_task_by_gid(tor.hash[:12]):
         task.listener.size = tor.size
+        await release_small_queued_task(task.listener)
         mmsg = await limit_checker(task.listener)
         if mmsg:
             await _on_download_error(mmsg, tor, is_limit=True)
@@ -77,6 +82,7 @@ async def _on_download_complete(tor):
     ext_hash = tor.hash
     tag = tor.tags[0]
     if task := await get_task_by_gid(ext_hash[:12]):
+        keep_bq_files = getattr(task.listener, "bq_remove_torrent_keep_files", False)
         if not task.listener.seed:
             await TorrentManager.qbittorrent.torrents.stop([ext_hash])
         if task.listener.select:
@@ -89,8 +95,12 @@ async def _on_download_complete(tor):
                         await remove(f"{path}/{f.name}")
                     except Exception:
                         pass
+        if keep_bq_files:
+            await _remove_torrent(ext_hash, tag, delete_files=False)
         await task.listener.on_download_complete()
         if intervals["stopAll"]:
+            return
+        if keep_bq_files:
             return
         if task.listener.seed and not task.listener.is_cancelled:
             async with task_dict_lock:

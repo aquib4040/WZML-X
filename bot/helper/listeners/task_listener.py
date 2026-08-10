@@ -3,7 +3,7 @@ from html import escape
 from time import time
 from mimetypes import guess_type
 from contextlib import suppress
-from os import path as ospath
+from os import path as ospath, walk
 
 from aiofiles.os import listdir, remove, path as aiopath
 from requests import utils as rutils
@@ -17,6 +17,10 @@ from ... import (
     non_queued_dl,
     queued_up,
     queued_dl,
+    rss_non_queued_up,
+    rss_non_queued_dl,
+    rss_queued_up,
+    rss_queued_dl,
     queue_dict_lock,
     same_directory_lock,
     DOWNLOAD_DIR,
@@ -33,8 +37,10 @@ from ..ext_utils.files_utils import (
     clean_download,
     clean_target,
     create_recursive_symlink,
+    ensure_media_extension,
     get_path_size,
     join_files,
+    join_split_zip_files,
     remove_excluded_files,
     move_and_merge,
 )
@@ -69,10 +75,67 @@ from ..telegram_helper.message_utils import (
     update_status_message,
 )
 
+_VIDEO_EXTENSIONS = {
+    ".mkv",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".wmv",
+    ".flv",
+    ".webm",
+    ".m4v",
+    ".ts",
+    ".m2ts",
+}
+
+
+async def _first_video_name(path):
+    if await aiopath.isfile(path):
+        name = ospath.basename(path)
+        return name if ospath.splitext(name)[1].lower() in _VIDEO_EXTENSIONS else ""
+    if not await aiopath.isdir(path):
+        return ""
+    for dirpath, _, names in await sync_to_async(walk, path):
+        for name in sorted(names, key=str.lower):
+            if ospath.splitext(name)[1].lower() in _VIDEO_EXTENSIONS:
+                return name
+    return ""
+
+
+async def _first_video_path(path):
+    if await aiopath.isfile(path):
+        if ospath.splitext(path)[1].lower() in _VIDEO_EXTENSIONS:
+            return path
+        return ""
+    if not await aiopath.isdir(path):
+        return ""
+    for dirpath, _, names in await sync_to_async(walk, path):
+        for name in sorted(names, key=str.lower):
+            if ospath.splitext(name)[1].lower() in _VIDEO_EXTENSIONS:
+                return ospath.join(dirpath, name)
+    return ""
+
 
 class TaskListener(TaskConfig):
     def __init__(self):
         super().__init__()
+
+    def _mark_bq_done(self, result):
+        event = getattr(self, "bq_done_event", None)
+        if event and not event.is_set():
+            self.bq_result = result
+            event.set()
+        controller_gid = getattr(self, "batch_controller_gid", "")
+        if controller_gid and result != "complete":
+            with suppress(Exception):
+                from ...modules.batch_task_registry import mark_controller_cancelled
+
+                mark_controller_cancelled(controller_gid, str(result))
+
+    def _mark_batch_download_done(self):
+        event = getattr(self, "batch_download_event", None)
+        if event and not event.is_set():
+            event.set()
 
     async def clean(self):
         with suppress(Exception):
@@ -169,6 +232,8 @@ class TaskListener(TaskConfig):
                 return
             download = task_dict[self.mid]
             self.name = download.name()
+            if not self.merge_source_name:
+                self.merge_source_name = self.name
             gid = download.gid()
         LOGGER.info(f"Download completed: {self.name}")
 
@@ -187,6 +252,14 @@ class TaskListener(TaskConfig):
         if self.folder_name:
             self.name = self.folder_name.strip("/").split("/", 1)[0]
 
+        if not await aiopath.exists(self.dir):
+            await self.on_upload_error(
+                f"Download folder missing: {self.dir}. "
+                "It was cleaned or cancelled before upload could start. "
+                "If this repeats, stop duplicate bot containers using the same VPS."
+            )
+            return
+
         if not await aiopath.exists(f"{self.dir}/{self.name}"):
             try:
                 files = await listdir(self.dir)
@@ -201,6 +274,13 @@ class TaskListener(TaskConfig):
         self.size = await get_path_size(dl_path)
         self.is_file = await aiopath.isfile(dl_path)
 
+        if self.is_file:
+            normalized_path = await ensure_media_extension(dl_path)
+            if normalized_path != dl_path:
+                dl_path = normalized_path
+                self.name = ospath.basename(dl_path)
+                self.size = await get_path_size(dl_path)
+
         if self.seed:
             up_dir = self.up_dir = f"{self.dir}10000"
             up_path = f"{self.up_dir}/{self.name}"
@@ -211,6 +291,23 @@ class TaskListener(TaskConfig):
             up_path = dl_path
 
         await remove_excluded_files(self.up_dir or self.dir, self.excluded_extensions)
+
+        from ..video_utils.auto_process import (
+            auto_enabled,
+            bool_setting,
+            maybe_enable_auto_unzip,
+            process_auto_finish_pipeline,
+            process_auto_pipeline,
+        )
+
+        if getattr(self, "zip_merge", False) and await aiopath.isdir(up_path):
+            joined = await join_split_zip_files(up_path)
+            if joined:
+                self.extract = True
+                first = ospath.basename(joined[0])
+                self.file_details.setdefault("filename", first)
+
+        await maybe_enable_auto_unzip(self, up_path)
 
         if not Config.QUEUE_ALL:
             async with queue_dict_lock:
@@ -225,11 +322,43 @@ class TaskListener(TaskConfig):
             up_path = await self.proceed_extract(up_path, gid)
             if self.is_cancelled:
                 return
+            if await aiopath.isfile(up_path):
+                up_path = await ensure_media_extension(up_path)
             self.is_file = await aiopath.isfile(up_path)
             self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
             self.size = await get_path_size(up_dir)
             self.clear()
             await remove_excluded_files(up_dir, self.excluded_extensions)
+
+        first_video = await _first_video_name(up_path)
+        if first_video:
+            self.file_details["first_file"] = first_video
+            if not self.file_details.get("filename"):
+                self.file_details["filename"] = first_video
+            if (
+                self.extract
+                and not self.video_tool
+                and bool_setting(self, "AUTO_VT")
+                and not getattr(self, "rss_auto_leech", False)
+            ):
+                self.video_tool = True
+
+        if auto_enabled(self) and not self.video_tool and not self.is_cancelled:
+            up_path = await process_auto_pipeline(self, up_path, gid)
+            if self.is_cancelled:
+                return
+            self.is_file = await aiopath.isfile(up_path)
+            self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
+            self.size = await get_path_size(up_dir)
+            self.clear()
+        elif getattr(self, "force_intro_subtitle", False) and not self.video_tool and not self.is_cancelled:
+            up_path = await process_auto_finish_pipeline(self, up_path, gid)
+            if self.is_cancelled:
+                return
+            self.is_file = await aiopath.isfile(up_path)
+            self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
+            self.size = await get_path_size(up_dir)
+            self.clear()
 
         if self.ffmpeg_cmds:
             up_path = await self.proceed_ffmpeg(
@@ -254,10 +383,23 @@ class TaskListener(TaskConfig):
             self.size = await get_path_size(up_dir)
             self.clear()
 
-        if (
+        if self.video_tool and auto_enabled(self) and not self.is_cancelled:
+            up_path = await process_auto_finish_pipeline(self, up_path, gid)
+            if self.is_cancelled:
+                return
+            self.is_file = await aiopath.isfile(up_path)
+            self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
+            self.size = await get_path_size(up_dir)
+            self.clear()
+
+        metadata_allowed = True
+        if auto_enabled(self):
+            metadata_allowed = bool_setting(self, "AUTO_METADATA")
+        if metadata_allowed and not getattr(self, "_vt_extract_only", False) and (
             (hasattr(self, "metadata_dict") and self.metadata_dict)
             or (hasattr(self, "audio_metadata_dict") and self.audio_metadata_dict)
             or (hasattr(self, "video_metadata_dict") and self.video_metadata_dict)
+            or (hasattr(self, "subtitle_metadata_dict") and self.subtitle_metadata_dict)
         ):
             up_path = await apply_metadata_title(
                 self,
@@ -266,6 +408,7 @@ class TaskListener(TaskConfig):
                 getattr(self, "metadata_dict", {}),
                 getattr(self, "audio_metadata_dict", {}),
                 getattr(self, "video_metadata_dict", {}),
+                getattr(self, "subtitle_metadata_dict", {}),
             )
             if self.is_cancelled:
                 return
@@ -280,6 +423,25 @@ class TaskListener(TaskConfig):
             self.file_details["mime_type"] = (guess_type(fname))[
                 0
             ] or "application/octet-stream"
+
+        thumbnail_mode = str(
+            self.user_dict.get("THUMBNAIL_MODE", Config.THUMBNAIL_MODE)
+            or "automatic"
+        ).lower()
+        if (
+            self.is_leech
+            and thumbnail_mode == "manual"
+            and not self.thumb
+            and not getattr(self, "rss_auto_leech", False)
+            and not self.is_cancelled
+        ):
+            manual_media_path = await _first_video_path(up_path)
+            if manual_media_path:
+                from ...modules.poster_search import open_task_thumbnail_picker
+
+                await open_task_thumbnail_picker(self, manual_media_path)
+                if self.is_cancelled:
+                    return
 
         if self.name_swap:
             up_path = await self.substitute(up_path)
@@ -337,6 +499,7 @@ class TaskListener(TaskConfig):
             self.clear()
 
         self.subproc = None
+        self._mark_batch_download_done()
 
         add_to_queue, event = await check_running_tasks(self, "up")
         await start_from_queued()
@@ -362,6 +525,42 @@ class TaskListener(TaskConfig):
             )
             del yt
         elif self.is_leech:
+            try:
+                from ..poster_engine import generate_task_poster
+
+                def _poster_bool(value, default=False):
+                    if isinstance(value, bool):
+                        return value
+                    if value is None:
+                        return default
+                    text = str(value).strip().lower()
+                    return text in {"1", "true", "yes", "y", "on"} if text else default
+
+                # Folder tasks still need a real media file for stream metadata
+                # (languages, audio codec/channels, duration and resolution).
+                poster_path = await _first_video_path(up_path)
+                poster_payload = await generate_task_poster(
+                    self.name,
+                    poster_path,
+                    self.user_id,
+                    self.user_dict,
+                    file_caption=getattr(self, "file_details", {}).get("caption", ""),
+                    first_file=getattr(self, "file_details", {}).get("first_file", ""),
+                    custom_name=getattr(self, "custom_name", ""),
+                    link=getattr(self, "source_url", ""),
+                    merge_source_name=getattr(self, "merge_source_name", ""),
+                    as_doc=self.as_doc,
+                )
+                if poster_payload:
+                    self.auto_post = poster_payload
+                    use_poster_thumb = self.user_dict.get(
+                        "AUTO_POSTER_USE_AS_THUMBNAIL",
+                        Config.AUTO_POSTER_USE_AS_THUMBNAIL,
+                    )
+                    if _poster_bool(use_poster_thumb, True) and not self.thumb:
+                        self.thumb = poster_payload.get("path") or self.thumb
+            except Exception as e:
+                LOGGER.warning(f"Auto poster generation failed: {e}", exc_info=True)
             LOGGER.info(f"Leech Name: {self.name}")
             tg = TelegramUploader(self, up_dir)
             async with task_dict_lock:
@@ -393,7 +592,7 @@ class TaskListener(TaskConfig):
                 sync_to_async(drive.upload),
             )
             del drive
-        else:
+        elif not self.is_leech:
             LOGGER.info(f"Rclone Upload Name: {self.name}")
             RCTransfer = RcloneTransferHelper(self)
             async with task_dict_lock:
@@ -448,21 +647,26 @@ class TaskListener(TaskConfig):
             await send_message(self.message, user_message, button)
 
         elif self.is_leech:
+            complete_msg = (
+                self.user_dict.get("LEECH_COMPLETE_MSG")
+                if "LEECH_COMPLETE_MSG" in self.user_dict
+                else Config.LEECH_COMPLETE_MSG
+            )
             msg += f"\n<b>Total Files: </b>{folders}"
             if mime_type != 0:
                 msg += f"\n┠ <b>Corrupted Files</b> → {mime_type}"
             msg += f"\n┖ <b>Task By</b> → {self.tag}\n\n"
 
-            if self.bot_pm:
+            if complete_msg and self.bot_pm:
                 pmsg = msg
                 pmsg += "〶 <b><u>Action Performed :</u></b>\n"
                 pmsg += "⋗ <i>File(s) have been sent to User PM</i>\n\n"
                 if self.is_super_chat:
                     await send_message(self.message, pmsg)
 
-            if not files and not self.is_super_chat:
+            if complete_msg and not files and not self.is_super_chat:
                 await send_message(self.message, msg)
-            else:
+            elif complete_msg:
                 log_chat = self.user_id if self.bot_pm else self.message
                 msg += "〶 <b><u>Files List :</u></b>\n"
                 fmsg = ""
@@ -556,6 +760,9 @@ class TaskListener(TaskConfig):
             if multi_link_msg:
                 group_msg += multi_link_msg + "\n"
                 msg += multi_link_msg + "\n"
+            if attach_link := getattr(self, "attach_link", ""):
+                msg += f"Attach: <code>{escape(str(attach_link))}</code>\n"
+                group_msg += f"Attach: <code>{escape(str(attach_link))}</code>\n"
 
             if self.bot_pm and self.is_super_chat:
                 await send_message(self.user_id, msg, button)
@@ -569,13 +776,16 @@ class TaskListener(TaskConfig):
             async with queue_dict_lock:
                 if self.mid in non_queued_up:
                     non_queued_up.remove(self.mid)
+                if self.mid in rss_non_queued_up:
+                    rss_non_queued_up.remove(self.mid)
             await start_from_queued()
             return
 
         if self.pm_msg and (not Config.DELETE_LINKS or Config.CLEAN_LOG_MSG):
             await delete_message(self.pm_msg)
 
-        await clean_download(self.dir)
+        if not getattr(self, "bq_remove_torrent_keep_files", False):
+            await clean_download(self.dir)
         async with task_dict_lock:
             if self.mid in task_dict:
                 del task_dict[self.mid]
@@ -588,8 +798,12 @@ class TaskListener(TaskConfig):
         async with queue_dict_lock:
             if self.mid in non_queued_up:
                 non_queued_up.remove(self.mid)
+            if self.mid in rss_non_queued_up:
+                rss_non_queued_up.remove(self.mid)
 
         await start_from_queued()
+        self.mark_multi_step_done()
+        self._mark_bq_done("complete")
 
     async def on_download_error(self, error, button=None, is_limit=False):
         async with task_dict_lock:
@@ -635,18 +849,31 @@ class TaskListener(TaskConfig):
             if self.mid in queued_up:
                 queued_up[self.mid].set()
                 del queued_up[self.mid]
+            if self.mid in rss_queued_dl:
+                rss_queued_dl[self.mid].set()
+                del rss_queued_dl[self.mid]
+            if self.mid in rss_queued_up:
+                rss_queued_up[self.mid].set()
+                del rss_queued_up[self.mid]
             if self.mid in non_queued_dl:
                 non_queued_dl.remove(self.mid)
             if self.mid in non_queued_up:
                 non_queued_up.remove(self.mid)
+            if self.mid in rss_non_queued_dl:
+                rss_non_queued_dl.remove(self.mid)
+            if self.mid in rss_non_queued_up:
+                rss_non_queued_up.remove(self.mid)
 
         await start_from_queued()
         await sleep(3)
-        await clean_download(self.dir)
+        if not getattr(self, "bq_remove_torrent_keep_files", False):
+            await clean_download(self.dir)
         if self.up_dir:
             await clean_download(self.up_dir)
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
+        self._mark_bq_done(f"download_error: {error}")
+        self.mark_multi_step_done()
 
     async def on_upload_error(self, error):
         async with task_dict_lock:
@@ -673,15 +900,28 @@ class TaskListener(TaskConfig):
             if self.mid in queued_up:
                 queued_up[self.mid].set()
                 del queued_up[self.mid]
+            if self.mid in rss_queued_dl:
+                rss_queued_dl[self.mid].set()
+                del rss_queued_dl[self.mid]
+            if self.mid in rss_queued_up:
+                rss_queued_up[self.mid].set()
+                del rss_queued_up[self.mid]
             if self.mid in non_queued_dl:
                 non_queued_dl.remove(self.mid)
             if self.mid in non_queued_up:
                 non_queued_up.remove(self.mid)
+            if self.mid in rss_non_queued_dl:
+                rss_non_queued_dl.remove(self.mid)
+            if self.mid in rss_non_queued_up:
+                rss_non_queued_up.remove(self.mid)
 
         await start_from_queued()
         await sleep(3)
-        await clean_download(self.dir)
+        if not getattr(self, "bq_remove_torrent_keep_files", False):
+            await clean_download(self.dir)
         if self.up_dir:
             await clean_download(self.up_dir)
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
+        self._mark_bq_done(f"upload_error: {error}")
+        self.mark_multi_step_done()

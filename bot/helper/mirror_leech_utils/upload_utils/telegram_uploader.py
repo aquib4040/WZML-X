@@ -1,7 +1,8 @@
-from asyncio import sleep
+from asyncio import create_task, sleep
+from html import escape, unescape
 from logging import getLogger
 from os import path as ospath, walk
-from re import match as re_match, sub as re_sub
+from re import IGNORECASE, match as re_match, sub as re_sub
 from time import time
 
 from aioshutil import rmtree
@@ -26,7 +27,7 @@ from pyrogram.types import (
 from tenacity import (
     RetryError,
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -35,23 +36,52 @@ from ....core.config_manager import Config
 from ....core.tg_client import TgClient
 from ...ext_utils.bot_utils import sync_to_async
 from ...ext_utils.files_utils import get_base_name, is_archive
+from ...ext_utils.performance import (
+    get_premium_upload_workers,
+    get_tg_copy_delay,
+    get_tg_flood_wait_multiplier,
+)
+from ...ext_utils.starfallx_upload import (
+    private_dump_only,
+    starfallx_upload,
+)
 from ...ext_utils.status_utils import get_readable_file_size, get_readable_time
 from ...telegram_helper.message_utils import send_message
 from ...ext_utils.media_utils import (
+    apply_caption_word_replace,
+    apply_filename_word_replace,
     apply_regex_rename,
     apply_template_rename,
+    build_caption_metadata,
+    choose_media_title_seed,
+    clean_autorename_separators,
+    clean_rss_filename,
     download_image_thumb,
+    get_anime_landscape_thumbnail,
     get_audio_thumbnail,
     get_document_type,
     get_final_poster_url,
+    get_landscape_provider_thumbnail_url,
+    get_telegram_document_thumb,
     get_media_info,
     get_multiple_frames_thumbnail,
     get_video_thumbnail,
-    get_md5_hash,
 )
 from ...telegram_helper.message_utils import delete_message
 
 LOGGER = getLogger(__name__)
+
+PERMANENT_DESTINATION_ERRORS = {
+    "CHANNEL_INVALID",
+    "CHAT_ADMIN_REQUIRED",
+    "PEER_ID_INVALID",
+    "USER_NOT_PARTICIPANT",
+}
+
+
+def _retry_direct_upload(error):
+    error_text = f"{type(error).__name__}: {error}".upper()
+    return not any(code in error_text for code in PERMANENT_DESTINATION_ERRORS)
 
 
 class TelegramUploader:
@@ -73,7 +103,10 @@ class TelegramUploader:
         self._lprefix = ""
         self._lsuffix = ""
         self._lcaption = ""
+        self._caption_word_replace = ""
         self._lfont = ""
+        self._complete_msg = True
+        self._sequential_leech = True
         self._bot_pm = False
         self._media_group = False
         self._is_private = False
@@ -81,10 +114,19 @@ class TelegramUploader:
         self._log_msg = None
         self._user_session = self._listener.user_transmission
         self._error = ""
+        self._deferred_copies = []
+        self._active_route = None
+        self._private_dump_only = False
+        self._private_dump_warned = False
+        self._premium_workers = (
+            get_premium_upload_workers() if self._user_session else 1
+        )
 
     async def _upload_progress(self, current, _):
         if self._listener.is_cancelled:
-            if self._user_session:
+            if self._active_route and self._active_route.direct:
+                self._active_route.client.stop_transmission()
+            elif self._user_session:
                 TgClient.user.stop_transmission()
             else:
                 self._listener.client.stop_transmission()
@@ -99,7 +141,10 @@ class TelegramUploader:
             "LEECH_PREFIX": ("_lprefix", ""),
             "LEECH_SUFFIX": ("_lsuffix", ""),
             "LEECH_CAPTION": ("_lcaption", ""),
+            "CAPTION_WORD_REPLACE": ("_caption_word_replace", ""),
             "LEECH_FONT": ("_lfont", ""),
+            "LEECH_COMPLETE_MSG": ("_complete_msg", True),
+            "SEQUENTIAL_LEECH": ("_sequential_leech", True),
         }
 
         for key, (attr, default) in settings_map.items():
@@ -113,6 +158,9 @@ class TelegramUploader:
             self._thumb = None
 
     async def _msg_to_reply(self):
+        if getattr(self._listener, "rss_auto_leech", False):
+            self._sent_msg = self._listener.message
+            return True
         if self._listener.up_dest:
             msg_link = (
                 self._listener.message.link if self._listener.is_super_chat else ""
@@ -157,7 +205,21 @@ class TelegramUploader:
                                 f"Failed to send 'Leech Started' message to {self._listener.leech_dest}\n{e}",
                             )
             except Exception as e:
-                await self._listener.on_upload_error(str(e))
+                error_name = type(e).__name__
+                if error_name in {
+                    "ChannelInvalid",
+                    "ChatAdminRequired",
+                    "PeerIdInvalid",
+                    "UserNotParticipant",
+                }:
+                    error = (
+                        "Upload destination is inaccessible. Add the upload bot "
+                        "to the destination, grant permission to post, and verify "
+                        "the chat/topic ID."
+                    )
+                else:
+                    error = f"Unable to use upload destination: {e}"
+                await self._listener.on_upload_error(error)
                 return False
 
         elif self._user_session:
@@ -177,7 +239,37 @@ class TelegramUploader:
 
     async def _prepare_file(self, pre_file_, dirpath):
         cap_file_ = file_ = pre_file_
-
+        source_path = self._up_path or ospath.join(dirpath, pre_file_)
+        template_data = await build_caption_metadata(
+            pre_file_,
+            source_path,
+            source_filename=pre_file_,
+            file_caption=getattr(self._listener, "file_details", {}).get("caption", ""),
+            first_file=getattr(self._listener, "file_details", {}).get("first_file", ""),
+            custom_name=getattr(self._listener, "custom_name", ""),
+            link=getattr(self._listener, "source_url", ""),
+            merge_source_name=getattr(self._listener, "merge_source_name", ""),
+            prefer_filename=True,
+        )
+        rss_rename_mode = getattr(self._listener, "rss_rename_mode", "")
+        if getattr(self._listener, "rss_auto_leech", False) and rss_rename_mode in (
+            "title",
+            "remove_dots",
+        ):
+            rss_title = str(getattr(self._listener, "rss_item_title", "") or "").strip()
+            if rss_title:
+                _, rss_ext = ospath.splitext(rss_title)
+                _, file_ext = ospath.splitext(pre_file_)
+                file_ = rss_title if rss_ext else f"{rss_title}{file_ext}"
+                if rss_rename_mode == "remove_dots":
+                    file_ = clean_rss_filename(file_)
+                cap_file_ = file_
+                self._listener.skip_auto_rename = True
+                rss_skip_prefix_suffix = True
+            else:
+                rss_skip_prefix_suffix = False
+        else:
+            rss_skip_prefix_suffix = False
         # AutoRename logic: apply before prefix/suffix
         autorename_enabled = (
             self._listener.user_dict.get("AUTORENAME")
@@ -189,6 +281,16 @@ class TelegramUploader:
             or Config.RENAME_METHOD
         )
 
+        auto_process_enabled = (
+            self._listener.user_dict.get("AUTO_PROCESS")
+            if "AUTO_PROCESS" in self._listener.user_dict
+            else getattr(Config, "AUTO_PROCESS", False)
+        )
+        if auto_process_enabled:
+            autorename_enabled = bool(autorename_enabled)
+        if getattr(self._listener, "skip_auto_rename", False):
+            autorename_enabled = False
+
         if autorename_enabled:
             try:
                 if rename_method == "auto":
@@ -198,9 +300,26 @@ class TelegramUploader:
                     )
                     if template:
                         file_ = await apply_template_rename(
-                            file_, template, self._up_path
+                            file_,
+                            template,
+                            self._up_path,
+                            file_caption=getattr(self._listener, "file_details", {}).get("caption", ""),
+                            first_file=getattr(self._listener, "file_details", {}).get("first_file", ""),
+                            custom_name=getattr(self._listener, "custom_name", ""),
+                            link=getattr(self._listener, "source_url", ""),
+                            merge_source_name=getattr(self._listener, "merge_source_name", ""),
+                            prefer_filename=True,
+                            source_filename=pre_file_,
+                            template_metadata=template_data,
                         )
                         cap_file_ = file_
+                        clean_separators = self._listener.user_dict.get(
+                            "AUTORENAME_CLEAN_SEPARATORS",
+                            getattr(Config, "AUTORENAME_CLEAN_SEPARATORS", False),
+                        )
+                        if clean_separators:
+                            file_ = clean_autorename_separators(file_)
+                            cap_file_ = file_
                 elif rename_method == "regex":
                     pattern = (
                         self._listener.user_dict.get("lremname_regex")
@@ -212,24 +331,32 @@ class TelegramUploader:
             except Exception as e:
                 LOGGER.warning(f"AutoRename failed for {pre_file_}: {e}")
 
-        if self._lprefix:
+        if (
+            getattr(self._listener, "rss_auto_leech", False)
+            and not rss_skip_prefix_suffix
+            and rss_rename_mode == "remove_dots"
+        ):
+            file_ = clean_rss_filename(file_)
+            cap_file_ = clean_rss_filename(cap_file_)
+
+        if self._lprefix and not rss_skip_prefix_suffix:
             cap_file_ = self._lprefix.replace(r"\s", " ") + file_
             self._lprefix = re_sub(r"<.*?>", "", self._lprefix).replace(r"\s", " ")
             if not file_.startswith(self._lprefix):
                 file_ = f"{self._lprefix}{file_}"
 
-        if self._lsuffix:
+        if self._lsuffix and not rss_skip_prefix_suffix:
             name, ext = ospath.splitext(cap_file_)
             cap_file_ = name + self._lsuffix.replace(r"\s", " ") + ext
             self._lsuffix = re_sub(r"<.*?>", "", self._lsuffix).replace(r"\s", " ")
 
         cap_mono = (
-            f"<{Config.LEECH_FONT}>{cap_file_}</{Config.LEECH_FONT}>"
-            if Config.LEECH_FONT
+            f"<{self._lfont}>{cap_file_}</{self._lfont}>"
+            if self._lfont
             else cap_file_
         )
         if self._lcaption:
-            self._lcaption = re_sub(
+            caption_template = re_sub(
                 r"(\\\||\\\{|\\\}|\\s)",
                 lambda m: {r"\|": "%%", r"\{": "&%&", r"\}": "$%$", r"\s": " "}[
                     m.group(0)
@@ -237,24 +364,30 @@ class TelegramUploader:
                 self._lcaption,
             )
 
-            parts = self._lcaption.split("|")
+            parts = caption_template.split("|")
             parts[0] = re_sub(
                 r"\{([^}]+)\}", lambda m: f"{{{m.group(1).lower()}}}", parts[0]
             )
-            up_path = ospath.join(dirpath, pre_file_)
-            dur, qual, lang, subs = await get_media_info(up_path, True)
-            cap_mono = parts[0].format(
-                filename=cap_file_,
-                size=get_readable_file_size(await aiopath.getsize(up_path)),
-                duration=get_readable_time(dur),
-                quality=qual,
-                languages=lang,
-                subtitles=subs,
-                md5_hash=await sync_to_async(get_md5_hash, up_path),
+            up_path = source_path
+            caption_data = await build_caption_metadata(
+                cap_file_,
+                up_path,
                 mime_type=self._listener.file_details.get("mime_type", "text/plain"),
+                upload_filename=file_,
                 prefilename=self._listener.file_details.get("filename", ""),
                 precaption=self._listener.file_details.get("caption", ""),
+                file_caption=self._listener.file_details.get("caption", ""),
+                first_file=self._listener.file_details.get("first_file", ""),
+                custom_name=getattr(self._listener, "custom_name", ""),
+                link=getattr(self._listener, "source_url", ""),
+                source_filename=pre_file_,
+                template_metadata=template_data,
             )
+            try:
+                cap_mono = parts[0].format_map(caption_data)
+            except Exception as e:
+                LOGGER.warning(f"Caption format failed for {pre_file_}: {e}")
+                cap_mono = cap_file_
 
             for part in parts[1:]:
                 args = part.split(":")
@@ -268,7 +401,6 @@ class TelegramUploader:
                 lambda m: {"%%": "|", "&%&": "{", "$%$": "}"}[m.group()],
                 cap_mono,
             )
-
         if len(file_) > 255:
             if is_archive(file_):
                 name = get_base_name(file_)
@@ -289,6 +421,17 @@ class TelegramUploader:
         elif self._lsuffix:
             name, ext = ospath.splitext(file_)
             file_ = f"{name}{self._lsuffix}{ext}"
+
+        if self._caption_word_replace:
+            try:
+                file_ = apply_filename_word_replace(
+                    file_, self._caption_word_replace
+                )
+            except ValueError as error:
+                LOGGER.warning(f"Filename replacement skipped for {pre_file_}: {error}")
+            cap_mono = apply_caption_word_replace(
+                cap_mono, self._caption_word_replace
+            )
 
         if pre_file_ != file_:
             new_path = ospath.join(dirpath, file_)
@@ -332,6 +475,35 @@ class TelegramUploader:
                 )
             )[-1]
 
+    async def _send_auto_post(self):
+        post = getattr(self._listener, "auto_post", None)
+        if not post:
+            return
+        path = post.get("path")
+        if not path or not await aiopath.exists(path):
+            return
+        try:
+            caption = post.get("caption") or "<b>Poster</b>"
+            target = self._sent_msg or self._listener.message
+            poster_followup = caption if len(str(caption)) > 1000 else ""
+            media_caption = (
+                f"<b>{escape(str(post.get('title') or self._listener.name)[:900])}</b>"
+                if poster_followup
+                else caption
+            )
+            sent = await send_message(target, media_caption, photo=path)
+            if sent:
+                self._sent_msg = sent
+                if poster_followup:
+                    await self._send_caption_followup(sent, poster_followup)
+                if (
+                    (self._listener.is_super_chat or self._listener.up_dest)
+                    and not self._is_private
+                ):
+                    self._queue_deferred_copy(sent)
+        except Exception as err:
+            LOGGER.warning(f"Failed to send auto poster: {err}", exc_info=True)
+
     async def _send_media_group(self, subkey, key, msgs):
         for index, msg in enumerate(msgs):
             if self._listener.hybrid_leech or not self._user_session:
@@ -355,29 +527,111 @@ class TelegramUploader:
         if self._listener.is_super_chat or self._listener.up_dest:
             for m in msgs_list:
                 self._msgs_dict[m.link] = m.caption
+                self._queue_deferred_copy(m)
         self._sent_msg = msgs_list[-1]
 
 
-    async def _copy_media(self):
+    def _queue_deferred_copy(self, msg):
+        if not msg:
+            return
+        if self._private_dump_only:
+            if not self._private_dump_warned:
+                self._private_dump_warned = True
+                create_task(
+                    send_message(
+                        self._listener.user_id,
+                        "StarFallX: this task matched private-dump-only filters, so forwarding to user PM/dump was skipped.",
+                    )
+                )
+            return
+        if self._bot_pm or self._listener.leech_dest:
+            if self._sequential_leech:
+                self._deferred_copies.append((msg.chat.id, msg.id))
+            else:
+                create_task(self._copy_deferred_message(msg.chat.id, msg.id))
+
+    def _get_leech_dest(self):
+        leech_dest = self._listener.leech_dest
+        thread_id = None
+        if not leech_dest:
+            return None, None
+        if not isinstance(leech_dest, int):
+            if "|" in str(leech_dest):
+                leech_dest, thread_id = str(leech_dest).split("|", 1)
+                thread_id = int(thread_id) if thread_id.lstrip("-").isdigit() else None
+            if str(leech_dest).lstrip("-").isdigit():
+                leech_dest = int(leech_dest)
+        return leech_dest, thread_id
+
+    async def _copy_message_with_backoff(self, **kwargs):
         try:
-            if self._bot_pm:
-                await TgClient.bot.copy_message(
+            return await TgClient.bot.copy_message(**kwargs)
+        except (FloodWait, FloodPremiumWait) as f:
+            wait_time = max(f.value + 1, f.value * get_tg_flood_wait_multiplier())
+            LOGGER.warning(f"Copy flood wait: sleeping {wait_time:.1f}s")
+            await sleep(wait_time)
+            return await TgClient.bot.copy_message(**kwargs)
+        except BadRequest as error:
+            if "MEDIA_CAPTION_TOO_LONG" not in str(error).upper():
+                raise
+            source = await TgClient.bot.get_messages(
+                chat_id=kwargs["from_chat_id"],
+                message_ids=kwargs["message_id"],
+            )
+            original_caption = getattr(source, "caption", None)
+            clean_kwargs = dict(kwargs)
+            clean_kwargs["caption"] = "<code>Uploaded file</code>"
+            copied = await TgClient.bot.copy_message(**clean_kwargs)
+            if original_caption:
+                await self._send_caption_followup(copied, original_caption)
+            return copied
+
+    async def _flush_deferred_copies(self):
+        if not self._deferred_copies:
+            return
+        for chat_id, msg_id in self._deferred_copies:
+            if self._listener.is_cancelled:
+                return
+            await self._copy_deferred_message(chat_id, msg_id)
+            await sleep(get_tg_copy_delay())
+
+    async def _copy_deferred_message(self, chat_id, msg_id):
+        leech_dest, thread_id = self._get_leech_dest()
+        if self._bot_pm:
+            try:
+                await self._copy_message_with_backoff(
                     chat_id=self._listener.user_id,
-                    from_chat_id=self._sent_msg.chat.id,
-                    message_id=self._sent_msg.id,
+                    from_chat_id=chat_id,
+                    message_id=msg_id,
                     reply_to_message_id=(
-                        self._listener.pm_msg.id if self._listener.pm_msg else None
+                        self._listener.pm_msg.id
+                        if self._listener.pm_msg
+                        else None
                     ),
                 )
-        except Exception as err:
-            if not self._listener.is_cancelled:
+            except Exception as err:
                 LOGGER.error(f"Failed To Send in BotPM:\n{str(err)}")
+        if leech_dest:
+            try:
+                await self._copy_message_with_backoff(
+                    chat_id=leech_dest,
+                    from_chat_id=chat_id,
+                    message_id=msg_id,
+                    message_thread_id=thread_id,
+                )
+            except Exception as e:
+                LOGGER.error(f"Failed to forward to {leech_dest}: {e}")
+                await send_message(
+                    self._listener.user_id,
+                    f"Failed to forward to {leech_dest}\n{e}",
+                )
 
     async def upload(self):
         await self._user_settings()
         res = await self._msg_to_reply()
         if not res:
             return
+        await self._send_auto_post()
         is_log_del = False
         for dirpath, _, files in natsorted(await sync_to_async(walk, self._path)):
             if dirpath.strip().endswith("/yt-dlp-thumb"):
@@ -390,7 +644,7 @@ class TelegramUploader:
                 self._error = ""
                 self._up_path = f_path = ospath.join(dirpath, file_)
                 if not await aiopath.exists(self._up_path):
-                    LOGGER.error(f"{self._up_path} not exists! Continue uploading!")
+                    LOGGER.warning(f"{self._up_path} not found; skipping upload.")
                     continue
                 try:
                     f_size = await aiopath.getsize(self._up_path)
@@ -404,6 +658,8 @@ class TelegramUploader:
                     if self._listener.is_cancelled:
                         return
                     cap_mono = await self._prepare_file(file_, dirpath)
+                    f_path = self._up_path
+                    file_ = ospath.basename(self._up_path)
                     if self._last_msg_in_group:
                         group_lists = [
                             x for v in self._media_dict.values() for x in v.keys()
@@ -477,6 +733,9 @@ class TelegramUploader:
                 f"Files Corrupted or unable to upload. {self._error or 'Check logs!'}"
             )
             return
+        await self._flush_deferred_copies()
+        if self._listener.is_cancelled:
+            return
         LOGGER.info(f"Leech Completed: {self._listener.name}")
         await self._listener.on_upload_complete(
             None, self._msgs_dict, self._total_files, self._corrupted
@@ -486,9 +745,90 @@ class TelegramUploader:
     @retry(
         wait=wait_exponential(multiplier=2, min=4, max=8),
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception(_retry_direct_upload),
     )
-    async def _upload_file(self, cap_mono, file, o_path, force_document=False):
+    async def _send_direct_file(
+        self,
+        route,
+        key,
+        cap_mono,
+        thumb=None,
+        duration=0,
+        width=480,
+        height=320,
+        artist=None,
+        title=None,
+    ):
+        common = {
+            "chat_id": route.chat_id,
+            "caption": cap_mono,
+            "disable_notification": True,
+            "message_thread_id": route.thread_id,
+            "progress": self._upload_progress,
+        }
+        if key == "documents":
+            return await route.client.send_document(
+                document=self._up_path,
+                thumb=thumb,
+                disable_content_type_detection=True,
+                **common,
+            )
+        if key == "videos":
+            return await route.client.send_video(
+                video=self._up_path,
+                duration=duration,
+                width=width,
+                height=height,
+                thumb=thumb,
+                cover=thumb,
+                supports_streaming=True,
+                **common,
+            )
+        if key == "audios":
+            return await route.client.send_audio(
+                audio=self._up_path,
+                duration=duration,
+                performer=artist,
+                title=title,
+                thumb=thumb,
+                **common,
+            )
+        return await route.client.send_photo(
+            photo=self._up_path,
+            **common,
+        )
+
+    async def _send_caption_followup(self, message, caption):
+        plain = unescape(re_sub(r"<[^>]+>", "", str(caption or ""))).strip()
+        while plain and not self._listener.is_cancelled:
+            if len(plain) <= 4000:
+                chunk, plain = plain, ""
+            else:
+                split_at = plain.rfind("\n", 0, 4000)
+                if split_at < 1000:
+                    split_at = 4000
+                chunk, plain = plain[:split_at], plain[split_at:].lstrip()
+            await message.reply_text(
+                escape(chunk),
+                quote=True,
+                disable_web_page_preview=True,
+                disable_notification=True,
+            )
+
+    async def _upload_file(
+        self,
+        cap_mono,
+        file,
+        o_path,
+        force_document=False,
+        caption_followup=None,
+        transient_attempt=0,
+    ):
+        if not await aiopath.exists(o_path):
+            LOGGER.warning(f"{o_path} disappeared before upload; skipping.")
+            self._is_corrupted = True
+            return
+
         if self._sent_msg is None:
             LOGGER.error("Cannot upload: _sent_msg is None")
             await self._listener.on_upload_error(
@@ -510,44 +850,141 @@ class TelegramUploader:
         ):
             self._thumb = None
         thumb = self._thumb
+        doc_thumb = None
         self._is_corrupted = False
+        route = None
+        key = ""
+        if caption_followup is None and len(str(cap_mono or "")) > 1000:
+            caption_followup = cap_mono
+            cap_mono = f"<code>{escape(file[:900])}</code>"
         try:
             is_video, is_audio, is_image = await get_document_type(self._up_path)
+            queued_for_media_group = False
 
-            if not is_image and thumb is None:
-                file_name = ospath.splitext(file)[0]
-                thumb_path = f"{self._path}/yt-dlp-thumb/{file_name}.jpg"
-                if await aiopath.isfile(thumb_path):
-                    thumb = thumb_path
-                elif await aiopath.isfile(thumb_path.replace("/yt-dlp-thumb", "")):
-                    thumb = thumb_path.replace("/yt-dlp-thumb", "")
-                elif is_audio and not is_video:
-                    thumb = await get_audio_thumbnail(self._up_path)
-
-            # TMDb Auto-Thumbnail: fetch poster if still no thumb
+            # Auto thumbnail order: custom thumb, TMDb poster/backdrop, then local media.
             if not is_image and thumb is None:
                 auto_thumb_enabled = (
                     self._listener.user_dict.get("AUTO_THUMBNAIL")
                     if "AUTO_THUMBNAIL" in self._listener.user_dict
                     else Config.AUTO_THUMBNAIL
                 )
-                if auto_thumb_enabled:
+                thumbnail_mode = str(
+                    self._listener.user_dict.get(
+                        "THUMBNAIL_MODE", Config.THUMBNAIL_MODE
+                    )
+                    or "automatic"
+                ).lower()
+                if getattr(self._listener, "skip_auto_thumbnail", False):
+                    auto_thumb_enabled = False
+                if getattr(self._listener, "force_auto_thumbnail", False):
+                    auto_thumb_enabled = True
+                if auto_thumb_enabled or thumbnail_mode == "manual":
+                    LOGGER.info(f"Auto-thumbnail enabled for: {file}")
                     try:
                         as_doc = self._listener.as_doc
+                        if thumbnail_mode == "manual":
+                            landscape = f"thumbnails/{self._listener.user_id}_landscape.jpg"
+                            portrait = f"thumbnails/{self._listener.user_id}_poster.jpg"
+                            preferred = portrait if as_doc else landscape
+                            fallback = landscape if as_doc else portrait
+                            if await aiopath.exists(preferred):
+                                thumb = preferred
+                            elif await aiopath.exists(fallback):
+                                thumb = fallback
+                            elif await aiopath.exists(
+                                f"thumbnails/{self._listener.user_id}.jpg"
+                            ):
+                                thumb = f"thumbnails/{self._listener.user_id}.jpg"
+                            if thumb:
+                                LOGGER.info(f"Using manual thumbnail: {thumb}")
+                        if thumb:
+                            raise StopAsyncIteration
                         custom_name = getattr(self._listener, "custom_name", "")
+                        thumb_lookup_name = choose_media_title_seed(
+                            file,
+                            first_file=getattr(self._listener, "file_details", {}).get("first_file", ""),
+                            file_caption=getattr(self._listener, "file_details", {}).get("caption", ""),
+                            custom_name=custom_name,
+                            link=getattr(self._listener, "source_url", ""),
+                            merge_source_name=getattr(self._listener, "merge_source_name", ""),
+                            prefer_filename=True,
+                        )
+                        force_anime_thumb = getattr(self._listener, "force_anime_thumbnail", False)
                         rename_regex = (
                             self._listener.user_dict.get("lremname_regex")
                             or Config.LEECH_FILENAME_REMNAME_REGEX
                         )
-                        poster_url = await get_final_poster_url(
-                            custom_name or file, as_doc, rename_regex
-                        )
-                        if poster_url:
-                            tmdb_thumb = await download_image_thumb(poster_url)
-                            if tmdb_thumb:
-                                thumb = tmdb_thumb
+                        if is_video:
+                            thumb = await get_anime_landscape_thumbnail(
+                                self._up_path,
+                                thumb_lookup_name,
+                                None,
+                                rename_regex,
+                                force_anime_thumb,
+                            )
+                        if thumb is None and is_video:
+                            poster_url = await get_landscape_provider_thumbnail_url(
+                                thumb_lookup_name, rename_regex
+                            )
+                            if poster_url:
+                                tmdb_thumb = await download_image_thumb(
+                                    poster_url, landscape=True
+                                )
+                                if tmdb_thumb:
+                                    thumb = tmdb_thumb
+                        elif thumb is None:
+                            poster_url = await get_final_poster_url(
+                                thumb_lookup_name, as_doc, rename_regex
+                            )
+                            if poster_url:
+                                tmdb_thumb = await download_image_thumb(
+                                    poster_url, landscape=not as_doc
+                                )
+                                if tmdb_thumb:
+                                    thumb = tmdb_thumb
+                        if thumb:
+                            LOGGER.info(f"Auto-thumbnail selected: {thumb}")
+                        else:
+                            LOGGER.info(f"Auto-thumbnail provider lookup found no image for: {file}")
+                    except StopAsyncIteration:
+                        pass
                     except Exception as e:
                         LOGGER.warning(f"Auto-thumbnail failed: {e}")
+                else:
+                    LOGGER.info(f"Auto-thumbnail disabled for: {file}")
+            elif not is_image and thumb:
+                LOGGER.info(f"Using custom thumbnail for: {file}")
+
+            if not is_image and thumb is None:
+                file_name = ospath.splitext(file)[0]
+                thumb_path = f"{self._path}/yt-dlp-thumb/{file_name}.jpg"
+                if await aiopath.isfile(thumb_path):
+                    thumb = thumb_path
+                    LOGGER.info(f"Using yt-dlp thumbnail for: {file}")
+                elif await aiopath.isfile(thumb_path.replace("/yt-dlp-thumb", "")):
+                    thumb = thumb_path.replace("/yt-dlp-thumb", "")
+                    LOGGER.info(f"Using adjacent thumbnail for: {file}")
+                elif is_audio and not is_video:
+                    thumb = await get_audio_thumbnail(self._up_path)
+                    if thumb:
+                        LOGGER.info(f"Using embedded audio thumbnail for: {file}")
+
+            private_text = " ".join(
+                filter(
+                    None,
+                    [
+                        file,
+                        getattr(self._listener, "source_url", ""),
+                        getattr(self._listener, "file_details", {}).get("caption", ""),
+                    ],
+                )
+            )
+            self._private_dump_only = bool(self._private_dump_only or private_dump_only(private_text))
+            f_size = await aiopath.getsize(self._up_path)
+            route = await starfallx_upload.acquire_route(self._listener, f_size)
+            self._active_route = route
+            if getattr(route, "notice", ""):
+                await send_message(self._listener.message, route.notice)
 
             if (
                 self._listener.as_doc
@@ -557,20 +994,32 @@ class TelegramUploader:
                 key = "documents"
                 if is_video and thumb is None:
                     thumb = await get_video_thumbnail(self._up_path, None)
+                    if thumb:
+                        LOGGER.info(f"Using FFmpeg document thumbnail for: {file}")
 
                 if self._listener.is_cancelled:
+                    await starfallx_upload.release_route(route)
+                    self._active_route = None
                     return
                 if thumb == "none":
                     thumb = None
-                self._sent_msg = await self._sent_msg.reply_document(
-                    document=self._up_path,
-                    quote=True,
-                    thumb=thumb,
-                    caption=cap_mono,
-                    disable_content_type_detection=True,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
+                if thumb:
+                    doc_thumb = await get_telegram_document_thumb(thumb)
+                send_thumb = doc_thumb or thumb
+                if route.direct:
+                    self._sent_msg = await self._send_direct_file(
+                        route, key, cap_mono, thumb=send_thumb
+                    )
+                else:
+                    self._sent_msg = await self._sent_msg.reply_document(
+                        document=self._up_path,
+                        quote=True,
+                        thumb=send_thumb,
+                        caption=cap_mono,
+                        disable_content_type_detection=True,
+                        disable_notification=True,
+                        progress=self._upload_progress,
+                    )
             elif is_video:
                 key = "videos"
                 duration = (await get_media_info(self._up_path))[0]
@@ -580,8 +1029,12 @@ class TelegramUploader:
                         self._listener.thumbnail_layout,
                         self._listener.screen_shots,
                     )
+                    if thumb:
+                        LOGGER.info(f"Using layout thumbnail for: {file}")
                 if thumb is None:
                     thumb = await get_video_thumbnail(self._up_path, duration)
+                    if thumb:
+                        LOGGER.info(f"Using FFmpeg video thumbnail for: {file}")
                 if thumb is not None and thumb != "none":
                     with Image.open(thumb) as img:
                         width, height = img.size
@@ -589,55 +1042,91 @@ class TelegramUploader:
                     width = 480
                     height = 320
                 if self._listener.is_cancelled:
+                    await starfallx_upload.release_route(route)
+                    self._active_route = None
                     return
                 if thumb == "none":
                     thumb = None
-                self._sent_msg = await self._sent_msg.reply_video(
-                    video=self._up_path,
-                    quote=True,
-                    caption=cap_mono,
-                    duration=duration,
-                    width=width,
-                    height=height,
-                    thumb=thumb,
-                    cover=thumb,
-                    supports_streaming=True,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
+                if route.direct:
+                    self._sent_msg = await self._send_direct_file(
+                        route,
+                        key,
+                        cap_mono,
+                        thumb=thumb,
+                        duration=duration,
+                        width=width,
+                        height=height,
+                    )
+                else:
+                    self._sent_msg = await self._sent_msg.reply_video(
+                        video=self._up_path,
+                        quote=True,
+                        caption=cap_mono,
+                        duration=duration,
+                        width=width,
+                        height=height,
+                        thumb=thumb,
+                        cover=thumb,
+                        supports_streaming=True,
+                        disable_notification=True,
+                        progress=self._upload_progress,
+                    )
             elif is_audio:
                 key = "audios"
                 duration, artist, title = await get_media_info(self._up_path)
                 if self._listener.is_cancelled:
+                    await starfallx_upload.release_route(route)
+                    self._active_route = None
                     return
                 if thumb == "none":
                     thumb = None
-                self._sent_msg = await self._sent_msg.reply_audio(
-                    audio=self._up_path,
-                    quote=True,
-                    caption=cap_mono,
-                    duration=duration,
-                    performer=artist,
-                    title=title,
-                    thumb=thumb,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
+                if route.direct:
+                    self._sent_msg = await self._send_direct_file(
+                        route,
+                        key,
+                        cap_mono,
+                        thumb=thumb,
+                        duration=duration,
+                        artist=artist,
+                        title=title,
+                    )
+                else:
+                    self._sent_msg = await self._sent_msg.reply_audio(
+                        audio=self._up_path,
+                        quote=True,
+                        caption=cap_mono,
+                        duration=duration,
+                        performer=artist,
+                        title=title,
+                        thumb=thumb,
+                        disable_notification=True,
+                        progress=self._upload_progress,
+                    )
             else:
                 key = "photos"
                 if self._listener.is_cancelled:
+                    await starfallx_upload.release_route(route)
+                    self._active_route = None
                     return
-                self._sent_msg = await self._sent_msg.reply_photo(
-                    photo=self._up_path,
-                    quote=True,
-                    caption=cap_mono,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
+                if route.direct:
+                    self._sent_msg = await self._send_direct_file(route, key, cap_mono)
+                else:
+                    self._sent_msg = await self._sent_msg.reply_photo(
+                        photo=self._up_path,
+                        quote=True,
+                        caption=cap_mono,
+                        disable_notification=True,
+                        progress=self._upload_progress,
+                    )
+
+            if caption_followup and self._sent_msg:
+                await self._send_caption_followup(self._sent_msg, caption_followup)
+                caption_followup = ""
 
             if (
                 not self._listener.is_cancelled
                 and self._media_group
+                and not route.direct
                 and (self._sent_msg.video or self._sent_msg.document)
             ):
                 key = "documents" if self._sent_msg.document else "videos"
@@ -656,31 +1145,10 @@ class TelegramUploader:
                         await self._send_media_group(pname, key, msgs)
                     else:
                         self._last_msg_in_group = True
+                    queued_for_media_group = True
 
-            if self._sent_msg:
-                await self._copy_media()
-                if self._listener.leech_dest:
-                    try:
-                        leech_dest = self._listener.leech_dest
-                        if not isinstance(leech_dest, int):
-                            if "|" in str(leech_dest):
-                                leech_dest, _ = str(leech_dest).split("|", 1)
-                            if leech_dest.lstrip("-").isdigit():
-                                leech_dest = int(leech_dest)
-                        await TgClient.bot.copy_message(
-                            chat_id=leech_dest,
-                            from_chat_id=self._sent_msg.chat.id,
-                            message_id=self._sent_msg.id,
-                        )
-                    except Exception as e:
-                        if not self._listener.is_cancelled:
-                            LOGGER.error(
-                                f"Failed to forward to {self._listener.leech_dest}: {e}"
-                            )
-                            await send_message(
-                                self._listener.user_id,
-                                f"Failed to forward to {self._listener.leech_dest}\n{e}",
-                            )
+            if self._sent_msg and not queued_for_media_group and not getattr(route, "direct_final", False):
+                self._queue_deferred_copy(self._sent_msg)
 
             if (
                 self._thumb is None
@@ -688,28 +1156,82 @@ class TelegramUploader:
                 and await aiopath.exists(thumb)
             ):
                 await remove(thumb)
+            if (
+                doc_thumb
+                and doc_thumb != thumb
+                and await aiopath.exists(doc_thumb)
+            ):
+                await remove(doc_thumb)
+            await starfallx_upload.release_route(route)
+            self._active_route = None
         except (FloodWait, FloodPremiumWait) as f:
             LOGGER.warning(str(f))
-            await sleep(f.value * 1.3)
+            flood_wait = max(f.value + 1, f.value * get_tg_flood_wait_multiplier())
+            await starfallx_upload.release_route(route, failed=bool(route and route.direct), flood_wait=flood_wait)
+            self._active_route = None
+            await sleep(flood_wait)
             if (
                 self._thumb is None
                 and thumb is not None
                 and await aiopath.exists(thumb)
             ):
                 await remove(thumb)
-            return await self._upload_file(cap_mono, file, o_path)
+            if (
+                doc_thumb
+                and doc_thumb != thumb
+                and await aiopath.exists(doc_thumb)
+            ):
+                await remove(doc_thumb)
+            return await self._upload_file(
+                cap_mono,
+                file,
+                o_path,
+                force_document,
+                caption_followup,
+            )
         except Exception as err:
+            await starfallx_upload.release_route(route, failed=bool(route and route.direct))
+            self._active_route = None
             if (
                 self._thumb is None
                 and thumb is not None
                 and await aiopath.exists(thumb)
             ):
                 await remove(thumb)
+            if (
+                doc_thumb
+                and doc_thumb != thumb
+                and await aiopath.exists(doc_thumb)
+            ):
+                await remove(doc_thumb)
             err_type = "RPCError: " if isinstance(err, RPCError) else ""
             LOGGER.error(f"{err_type}{err}. Path: {self._up_path}", exc_info=True)
-            if isinstance(err, BadRequest) and key != "documents":
+            if "INTERDCCALL" in f"{type(err).__name__}: {err}".upper() and transient_attempt < 2:
+                await sleep(2 ** (transient_attempt + 1))
+                return await self._upload_file(
+                    cap_mono,
+                    file,
+                    o_path,
+                    force_document,
+                    caption_followup,
+                    transient_attempt + 1,
+                )
+            if (
+                isinstance(err, BadRequest)
+                and key != "documents"
+                and not any(
+                    code in str(err).upper()
+                    for code in PERMANENT_DESTINATION_ERRORS
+                )
+            ):
                 LOGGER.error(f"Retrying As Document. Path: {self._up_path}")
-                return await self._upload_file(cap_mono, file, o_path, True)
+                return await self._upload_file(
+                    cap_mono,
+                    file,
+                    o_path,
+                    True,
+                    caption_followup,
+                )
             raise err
 
     @property

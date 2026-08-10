@@ -74,7 +74,7 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
             return
         tor_info = await TorrentManager.qbittorrent.torrents.info(tag=f"{listener.mid}")
         if len(tor_info) == 0:
-            while True:
+            for _ in range(30):
                 if add_to_queue and event.is_set():
                     add_to_queue = False
                 tor_info = await TorrentManager.qbittorrent.torrents.info(
@@ -83,9 +83,19 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
                 if len(tor_info) > 0:
                     break
                 await sleep(1)
+            else:
+                await listener.on_download_error(
+                    "qBittorrent did not expose this batch after adding it. Try again after the current qB batch finishes."
+                )
+                return
         tor_info = tor_info[0]
         listener.name = tor_info.name
         ext_hash = tor_info.hash
+        if getattr(listener, "rss_auto_leech", False):
+            try:
+                await TorrentManager.qbittorrent.torrents.set_upload_limit([ext_hash], 0)
+            except Exception as err:
+                LOGGER.warning(f"Failed to set RSS qB upload limit to 0: {err}")
 
         async with task_dict_lock:
             task_dict[listener.mid] = QbittorrentStatus(listener, queued=add_to_queue)
@@ -97,8 +107,33 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
             LOGGER.info(f"QbitDownload started: {tor_info.name} - Hash: {ext_hash}")
 
         await listener.on_download_start()
+        listener.bq_started = True
 
-        if Config.BASE_URL and listener.select:
+        bq_selected = getattr(listener, "bq_selected_files", None)
+        if bq_selected is not None:
+            bq_unselected = getattr(listener, "bq_unselected_files", [])
+            if not add_to_queue:
+                await TorrentManager.qbittorrent.torrents.stop([ext_hash])
+            if bq_unselected:
+                await TorrentManager.qbittorrent.torrents.file_prio(
+                    hash=ext_hash, id=bq_unselected, priority=0
+                )
+            if bq_selected:
+                await TorrentManager.qbittorrent.torrents.file_prio(
+                    hash=ext_hash, id=bq_selected, priority=1
+                )
+            await send_message(
+                listener.message,
+                (
+                    f"Big Queue batch {getattr(listener, 'bq_batch_label', '')}: "
+                    f"selected <code>{len(bq_selected)}</code> file(s)."
+                ),
+            )
+            if listener.multi <= 1:
+                await send_status_message(listener.message)
+            if not add_to_queue:
+                await TorrentManager.qbittorrent.torrents.start([ext_hash])
+        elif Config.BASE_URL and listener.select:
             if listener.link.startswith("magnet:"):
                 metamsg = "Downloading Metadata, wait then you can select files. Use torrent file to avoid this wait."
                 meta = await send_message(listener.message, metamsg)

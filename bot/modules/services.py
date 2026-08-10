@@ -1,9 +1,11 @@
 from html import escape
+from pyrogram.enums import ButtonStyle
 from time import monotonic, time
 from uuid import uuid4
 from re import match
 
 from aiofiles import open as aiopen
+from aiofiles.os import path as aiopath
 from cloudscraper import create_scraper
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -89,18 +91,20 @@ async def start(_, message):
         start_string = lang.START_MSG.format(
             cmd=BotCommands.HelpCommand[0],
         )
-        await send_message(message, start_string, reply_markup)
+        await send_message(message, start_string, reply_markup, photo="IMAGES")
     elif Config.BOT_PM:
         await send_message(
             message,
             "<i>Now, Bot will send you all your files and links here. Start Using Now...</i>",
             reply_markup,
+            photo="IMAGES",
         )
     else:
         await send_message(
             message,
-            "<i>Bot can mirror/leech from links|tgfiles|torrents|nzb|rclone-cloud to any rclone cloud, Google Drive or to telegram.\n\n⚠️ You Are not authorized user! Deploy your own WZML-X bot</i>",
+            "<i>Bot can mirror/leech from links|tgfiles|torrents|nzb|rclone-cloud to any rclone cloud, Google Drive or to telegram.\n\n⚠️ You are not an authorized user! Deploy your own WZML-X bot</i>",
             reply_markup,
+            photo="IMAGES",
         )
     await database.set_pm_users(userid)
 
@@ -173,11 +177,24 @@ async def ping(_, message):
 @new_task
 async def log(_, message):
     uid = message.from_user.id
+    if not await aiopath.isfile("log.txt"):
+        return await send_message(message, "<b>Log file not found yet.</b>")
     buttons = ButtonMaker()
     buttons.data_button("Log Disp", f"log {uid} disp")
     buttons.data_button("Web Log", f"log {uid} web")
-    buttons.data_button("Close", f"log {uid} close")
-    await send_file(message, "log.txt", buttons=buttons.build_menu(2))
+    buttons.data_button("Close", f"log {uid} close", style=ButtonStyle.DANGER)
+    result = await send_file(message, "log.txt", buttons=buttons.build_menu(2))
+    if isinstance(result, str):
+        await send_message(message, f"<b>Failed to send log file:</b>\n<code>{escape(result)}</code>")
+
+
+@new_task
+async def sudo_only(_, message):
+    await send_message(
+        message,
+        "<b>This command is only for the owner/sudo users.</b>\n\n"
+        "<i>Add yourself as sudo or check OWNER_ID/SUDO_USERS in config.py.</i>",
+    )
 
 
 @new_task
@@ -211,7 +228,7 @@ async def log_cb(_, query):
             text = f"<b>Showing Last {len(res)} Lines from log.txt:</b> \n\n----------<b>START LOG</b>----------\n\n<blockquote expandable>{escape('\n'.join(reversed(res)))}</blockquote>\n----------<b>END LOG</b>----------"
 
             btn = ButtonMaker()
-            btn.data_button("Close", f"log {user_id} close")
+            btn.data_button("Close", f"log {user_id} close", style=ButtonStyle.DANGER)
             await send_message(message, text, btn.build_menu(1))
             await edit_reply_markup(message, None)
         except Exception as err:
@@ -248,7 +265,7 @@ async def log_cb(_, query):
         if resp.status_code == 200:
             await query.answer("Generating..")
             btn = ButtonMaker()
-            btn.url_button("📨 Web Paste (SB)", resp.url)
+            btn.url_button("📨 Web Paste (SB)", resp.url, style=ButtonStyle.PRIMARY)
             await edit_reply_markup(message, btn.build_menu(1))
         else:
             await query.answer("Web Paste Failed ! Check Logs", show_alert=True)

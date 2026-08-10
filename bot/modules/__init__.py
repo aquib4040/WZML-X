@@ -2,6 +2,9 @@ from .bot_settings import send_bot_settings, edit_bot_settings
 from .cancel_task import cancel, cancel_multi, cancel_all_buttons, cancel_all_update
 from .chat_permission import authorize, unauthorize, add_sudo, remove_sudo
 from .clone import clone_node
+from .clone_channel import clone_channel
+from .hstream_letter_leech import hstream_letter_leech, hstream_pause, hstream_resume
+from .create_torrent import create_torrent
 from .exec import aioexecute, execute, clear
 from .file_selector import select, confirm_selection
 from .force_start import remove_from_queue
@@ -11,9 +14,12 @@ from .gd_search import gdrive_search, select_type
 from .help import arg_usage, bot_help
 from .mediainfo import mediainfo
 from .broadcast import broadcast
+from .big_queue_leech import bq_leech
+from .batch_leech import batch_leech
 from .mirror_leech import (
     mirror,
     leech,
+    auto_leech,
     qb_leech,
     qb_mirror,
     jd_leech,
@@ -29,16 +35,37 @@ from .restart import (
     restart_sessions,
 )
 from .imdb import imdb_search, imdb_callback
+from .poster_search import (
+    pending_thumbnail_upload_filter,
+    poster_search,
+    poster_select,
+    receive_thumbnail_upload,
+    start_thumbnail_picker,
+)
+from .file_link import file_link
+from .sites import sites
 from .rss import get_rss_menu, rss_listener
+from .tamilmv import tamilmv
 from .search import torrent_search, torrent_search_update, initiate_search_tools
 from .nzb_search import hydra_search
-from .services import start, start_cb, login, ping, log, log_cb
+from .services import start, start_cb, login, ping, log, log_cb, sudo_only
 from .shell import run_shell
 from .stats import bot_stats, stats_pages, get_packages_version
 from .status import task_status, status_pages
-from .users_settings import get_users_settings, edit_user_settings, send_user_settings
+from .users_settings import (
+    edit_user_settings,
+    get_users_settings,
+    send_user_settings,
+    set_custom_thumbnail,
+)
 from .ytdlp import ytdl, ytdl_leech
 from .video_tool_ui import video_tools_callback
+from ..helper.video_utils.video_tools import (
+    active_merge_track_filter,
+    active_merge_text_filter,
+    video_tools_media_collector,
+    video_tools_text_collector,
+)
 
 __all__ = [
     "send_bot_settings",
@@ -52,6 +79,11 @@ __all__ = [
     "add_sudo",
     "remove_sudo",
     "clone_node",
+    "clone_channel",
+    "hstream_letter_leech",
+    "hstream_pause",
+    "hstream_resume",
+    "create_torrent",
     "aioexecute",
     "execute",
     "hydra_search",
@@ -67,7 +99,10 @@ __all__ = [
     "uphoster",
     "mirror",
     "leech",
+    "auto_leech",
     "qb_leech",
+    "bq_leech",
+    "batch_leech",
     "qb_mirror",
     "jd_leech",
     "jd_mirror",
@@ -79,8 +114,16 @@ __all__ = [
     "restart_sessions",
     "imdb_search",
     "imdb_callback",
+    "poster_search",
+    "poster_select",
+    "pending_thumbnail_upload_filter",
+    "receive_thumbnail_upload",
+    "start_thumbnail_picker",
+    "file_link",
+    "sites",
     "get_rss_menu",
     "rss_listener",
+    "tamilmv",
     "torrent_search",
     "torrent_search_update",
     "initiate_search_tools",
@@ -93,6 +136,7 @@ __all__ = [
     "ping",
     "log",
     "log_cb",
+    "sudo_only",
     "run_shell",
     "bot_stats",
     "stats_pages",
@@ -102,7 +146,12 @@ __all__ = [
     "get_users_settings",
     "edit_user_settings",
     "send_user_settings",
+    "set_custom_thumbnail",
     "ytdl",
     "ytdl_leech",
     "video_tools_callback",
+    "active_merge_track_filter",
+    "active_merge_text_filter",
+    "video_tools_media_collector",
+    "video_tools_text_collector",
 ]

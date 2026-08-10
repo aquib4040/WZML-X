@@ -3,12 +3,17 @@ from html import escape
 from re import findall
 from time import time
 
-from psutil import cpu_percent, disk_usage, virtual_memory
+from psutil import cpu_percent, disk_usage, net_io_counters, virtual_memory
+from pyrogram.enums import ButtonStyle
 
 from ... import (
     DOWNLOAD_DIR,
     bot_cache,
     bot_start_time,
+    non_queued_dl,
+    non_queued_up,
+    queued_dl,
+    queued_up,
     status_dict,
     task_dict,
     task_dict_lock,
@@ -17,6 +22,20 @@ from ...core.config_manager import Config
 from ..telegram_helper.button_build import ButtonMaker
 
 SIZE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"]
+GREEN_DOT = "\U0001F7E2"
+_network_sample = {"time": time(), "sent": 0, "recv": 0}
+
+
+def _network_status():
+    counters = net_io_counters()
+    now = time()
+    elapsed = max(0.001, now - _network_sample["time"])
+    sent_rate = max(0, counters.bytes_sent - _network_sample["sent"]) / elapsed
+    recv_rate = max(0, counters.bytes_recv - _network_sample["recv"]) / elapsed
+    if not _network_sample["sent"] and not _network_sample["recv"]:
+        sent_rate = recv_rate = 0
+    _network_sample.update(time=now, sent=counters.bytes_sent, recv=counters.bytes_recv)
+    return counters.bytes_sent + counters.bytes_recv, sent_rate, recv_rate
 
 
 class MirrorStatus:
@@ -34,6 +53,7 @@ class MirrorStatus:
     STATUS_SAMVID = "SamVid"
     STATUS_CONVERT = "Convert"
     STATUS_FFMPEG = "FFmpeg"
+    STATUS_AUTOPROCESS = "AutoProcess"
     STATUS_YT = "YouTube"
     STATUS_METADATA = "Metadata"
 
@@ -45,7 +65,7 @@ class EngineStatus:
         self.STATUS_AIOHTTP = f"AioHttp v{ver.get('aiohttp', 'N/A')}"
         self.STATUS_GDAPI = f"Google-API v{ver.get('gapi', 'N/A')}"
         self.STATUS_QBIT = f"qBit v{ver.get('qBittorrent', 'N/A')}"
-        self.STATUS_TGRAM = f"Pyro v{ver.get('pyrotgfork', 'N/A')}"
+        self.STATUS_TGRAM = f"{Config.UPLOAD_ENGINE} v{Config.UPLOAD_ENGINE_VERSION}"
         self.STATUS_MEGA = f"MegaCMD v{ver.get('mega', 'N/A')}"
         self.STATUS_YTDLP = f"yt-dlp v{ver.get('yt-dlp', 'N/A')}"
         self.STATUS_FFMPEG = f"ffmpeg v{ver.get('ffmpeg', 'N/A')}"
@@ -73,6 +93,7 @@ STATUSES = {
     "SP": MirrorStatus.STATUS_SPLIT,
     "SV": MirrorStatus.STATUS_SAMVID,
     "FF": MirrorStatus.STATUS_FFMPEG,
+    "AP": MirrorStatus.STATUS_AUTOPROCESS,
     "PA": MirrorStatus.STATUS_PAUSED,
     "CK": MirrorStatus.STATUS_CHECK,
 }
@@ -89,15 +110,26 @@ async def get_task_by_gid(gid: str):
 
 
 async def get_specific_tasks(status, user_id):
+    def visible_task(tk):
+        return not getattr(tk.listener, "rss_auto_leech", False)
+
     if status == "All":
         if user_id:
-            return [tk for tk in task_dict.values() if tk.listener.user_id == user_id]
+            return [
+                tk
+                for tk in task_dict.values()
+                if tk.listener.user_id == user_id and visible_task(tk)
+            ]
         else:
-            return list(task_dict.values())
+            return [tk for tk in task_dict.values() if visible_task(tk)]
     tasks_to_check = (
-        [tk for tk in task_dict.values() if tk.listener.user_id == user_id]
+        [
+            tk
+            for tk in task_dict.values()
+            if tk.listener.user_id == user_id and visible_task(tk)
+        ]
         if user_id
-        else list(task_dict.values())
+        else [tk for tk in task_dict.values() if visible_task(tk)]
     )
     coro_tasks = []
     coro_tasks.extend(tk for tk in tasks_to_check if iscoroutinefunction(tk.status))
@@ -177,22 +209,31 @@ def time_to_seconds(time_duration):
 
 
 def speed_string_to_bytes(size_text: str):
+    if isinstance(size_text, (int, float)):
+        return int(size_text)
+    if not size_text:
+        return 0
     size = 0
-    size_text = size_text.lower()
-    if "k" in size_text:
-        size += float(size_text.split("k")[0]) * 1024
-    elif "m" in size_text:
-        size += float(size_text.split("m")[0]) * 1048576
-    elif "g" in size_text:
-        size += float(size_text.split("g")[0]) * 1073741824
-    elif "t" in size_text:
-        size += float(size_text.split("t")[0]) * 1099511627776
-    elif "b" in size_text:
-        size += float(size_text.split("b")[0])
-    return size
+    size_text = str(size_text).strip().lower()
+    try:
+        if "k" in size_text:
+            size += float(size_text.split("k")[0]) * 1024
+        elif "m" in size_text:
+            size += float(size_text.split("m")[0]) * 1048576
+        elif "g" in size_text:
+            size += float(size_text.split("g")[0]) * 1073741824
+        elif "t" in size_text:
+            size += float(size_text.split("t")[0]) * 1099511627776
+        elif "b" in size_text:
+            size += float(size_text.split("b")[0])
+        elif size_text:
+            size += float(size_text)
+    except (TypeError, ValueError):
+        return 0
+    return int(size)
 
 
-def get_progress_bar_string(pct):
+def _legacy_progress_bar_string(pct):
     pct = float(str(pct).strip("%"))
     p = min(max(pct, 0), 100)
     cFull = int(p // 8)
@@ -200,8 +241,170 @@ def get_progress_bar_string(pct):
     p_str += "⬡" * (12 - cFull)
     return f"[{p_str}]"
 
+def _legacy_square_progress_bar_string(pct):
+    pct = float(str(pct).strip("%"))
+    p = min(max(pct, 0), 100)
+    full = int(p // 8)
+    return f"[{'■' * full}{'□' * (12 - full)}]"
 
-async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=1):
+
+def get_progress_bar_string(pct):
+    try:
+        pct = float(str(pct).strip("%"))
+    except (TypeError, ValueError):
+        pct = 0
+    progress = min(max(pct, 0), 100)
+    full = int(progress // 8)
+    return f"[{'■' * full}{'□' * (12 - full)}]"
+
+
+def _compact_task_name(name, limit=90):
+    name = " ".join(str(name or "Unnamed task").split())
+    return name if len(name) <= limit else f"{name[: limit - 1]}…"
+
+
+def _status_theme():
+    theme = str(
+        getattr(Config, "BOT_THEME", "")
+        or getattr(Config, "STATUS_THEME", "")
+        or "starfall"
+    ).lower()
+    if theme in {"starfall_neo", "neo", "neo_minimal"}:
+        return "starfall"
+    return theme
+
+
+def is_starfall_theme():
+    return _status_theme() == "starfall"
+
+
+def get_starfall_system_status():
+    disk = disk_usage(DOWNLOAD_DIR)
+    uptime = get_readable_time(time() - bot_start_time) or "0s"
+    total_net, tx_rate, rx_rate = _network_status()
+    return (
+        "◉⃝     <b>Starfall Status</b>  ◉⃝\n"
+        "╔══════════════════\n"
+        f"╠ CPU ➥ {cpu_percent()}% | F ➥ {get_readable_file_size(disk.free)}\n"
+        f"╠ RAM ➥ {virtual_memory().percent}% | UP ➥ {uptime}\n"
+        f"╠ NET ➥ {get_readable_file_size(total_net)} | "
+        f"↓ {get_readable_file_size(rx_rate)}/s ↑ {get_readable_file_size(tx_rate)}/s\n"
+        "╚══════════════════"
+    )
+
+
+def get_legacy_system_status():
+    disk = disk_usage(DOWNLOAD_DIR)
+    uptime = get_readable_time(time() - bot_start_time) or "0s"
+    total_net, tx_rate, rx_rate = _network_status()
+    return (
+        "⌬ <b><u>Bot Stats</u></b>\n"
+        f"┟ <b>CPU</b> → {cpu_percent()}% | <b>F</b> → "
+        f"{get_readable_file_size(disk.free)}\n"
+        f"┠ <b>RAM</b> → {virtual_memory().percent}% | <b>UP</b> → {uptime}\n"
+        f"┖ <b>NET</b> → {get_readable_file_size(total_net)} | ↓ {get_readable_file_size(rx_rate)}/s ↑ {get_readable_file_size(tx_rate)}/s"
+    )
+
+
+def _starfall_progress(progress):
+    try:
+        value = min(max(float(str(progress).strip("%")), 0), 100)
+    except (TypeError, ValueError):
+        value = 0
+    full = min(10, int(value // 10))
+    label = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{'▰' * full}{'▱' * (10 - full)}", f"{label}%"
+
+
+def _task_value(task, method, default="-"):
+    try:
+        value = getattr(task, method)()
+        return default if value in (None, "") else value
+    except Exception:
+        return default
+
+
+def _eta_total(eta, elapsed_seconds):
+    eta_text = str(eta or "-").strip()
+    if eta_text in {"", "-", "N/A", "NA", "None", "∞"}:
+        return "-", "-"
+    eta_seconds = get_raw_time(eta_text)
+    if not eta_seconds and (
+        ":" in eta_text or eta_text.replace(".", "", 1).isdigit()
+    ):
+        eta_seconds = time_to_seconds(eta_text)
+    if eta_seconds < 0:
+        return "-", "-"
+    total = get_readable_time(elapsed_seconds + eta_seconds) or "0s"
+    return eta_text, total
+
+
+def _starfall_task_card(number, task, task_status, cancel_command):
+    listener = task.listener
+    name = escape(_compact_task_name(_task_value(task, "name", "Unnamed task"), 96))
+    message = listener.message
+    owner = getattr(message, "from_user", None)
+    owner_name = owner.mention(style="html") if owner else "Unknown"
+    source_link = getattr(message, "link", None)
+    owner_line = f"𝆺𝅥⃝🐦‍🔥❯ {owner_name}"
+    if source_link:
+        owner_line += f" <a href='{escape(str(source_link), quote=True)}'>[Link]</a>"
+
+    elapsed_seconds = max(0, time() - message.date.timestamp())
+    progress = _task_value(task, "progress", "0%")
+    bar, progress_label = _starfall_progress(progress)
+    lines = [
+        f"<code>{number}. {name}</code>",
+        "",
+        owner_line,
+        "╔════════════════",
+        f"╠ {bar} {progress_label}",
+    ]
+
+    if task_status == MirrorStatus.STATUS_SEED:
+        lines.extend(
+            (
+                f"╠ Processed ➥ {_task_value(task, 'uploaded_bytes', '0B')} of {_task_value(task, 'size', '0B')}",
+                f"╠ Status ➥ {escape(str(task_status))}",
+                f"╠ Speed ➥ {_task_value(task, 'seed_speed', '0B/s')}",
+                f"╠ Ratio ➥ {_task_value(task, 'ratio')}",
+                f"╠ Time ➥ {_task_value(task, 'seeding_time')}",
+            )
+        )
+    else:
+        eta, total = _eta_total(_task_value(task, "eta"), elapsed_seconds)
+        lines.extend(
+            (
+                f"╠ Processed ➥ {_task_value(task, 'processed_bytes', '0B')} of {_task_value(task, 'size', '0B')}",
+                f"╠ Status ➥ {escape(str(task_status))}",
+                f"╠ Speed ➥ {_task_value(task, 'speed', '0B/s')}",
+                f"╠ Time ➥ {escape(str(eta))} ({escape(str(total))})",
+            )
+        )
+        if task_status == MirrorStatus.STATUS_DOWNLOAD and (
+            getattr(listener, "is_torrent", False)
+            or getattr(listener, "is_qbit", False)
+        ):
+            seeders = _task_value(task, "seeders_num", None)
+            leechers = _task_value(task, "leechers_num", None)
+            if seeders is not None and leechers is not None:
+                lines.append(f"╠ Seeders ➥ {seeders} | Leechers ➥ {leechers}")
+
+    mode = getattr(listener, "mode", ("#Unknown", "#Unknown"))
+    in_mode = escape(str(mode[0] if len(mode) > 0 else "#Unknown"))
+    out_mode = escape(str(mode[1] if len(mode) > 1 else "#Unknown"))
+    lines.extend(
+        (
+            f"╠ Engine ➥ {escape(str(getattr(task, 'engine', 'Unknown')))}",
+            f"╠ Mode ➥ {in_mode} ~ {out_mode}",
+            f"╠ Stop ➥ <code>/{cancel_command}_{escape(str(_task_value(task, 'gid', 'unknown')))}</code>",
+            "╚═════════════════",
+        )
+    )
+    return "\n".join(lines)
+
+
+async def _get_readable_message_legacy(sid, is_user, page_no=1, status="All", page_step=1):
     msg = ""
     button = None
 
@@ -228,7 +431,8 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
         else:
             tstatus = task.status()
         msg += f"<b>{index + start_position}.</b> "
-        msg += f"<b><i>{escape(f'{task.name()}')}</i></b>"
+        task_name = escape(_compact_task_name(task.name()))
+        msg += f"<b><i>{task_name}</i></b>"
         if task.listener.subname:
             msg += f"\n┖ <b>Sub Name</b> → <i>{task.listener.subname}</i>"
         elapsed = time() - task.listener.message.date.timestamp()
@@ -273,6 +477,12 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
         else:
             msg += f"\n┠ <b>Size</b> → <i>{task.size()}</i>"
         msg += f"\n┠ <b>Engine</b> → <i>{task.engine}</i>"
+        upload_engine = getattr(task.listener, "upload_engine", "")
+        upload_client = getattr(task.listener, "upload_client", "")
+        if upload_engine:
+            msg += f"\n┠ <b>Upload Engine</b> → <i>{upload_engine}</i>"
+        if upload_client:
+            msg += f"\n┠ <b>Upload Client</b> → <i>{upload_client}</i>"
         msg += f"\n┠ <b>In Mode</b> → <i>{task.listener.mode[0]}</i>"
         msg += f"\n┠ <b>Out Mode</b> → <i>{task.listener.mode[1]}</i>"
         # TODO: Add Bt Sel
@@ -289,7 +499,7 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
     msg += "⌬ <b><u>Bot Stats</u></b>"
     buttons = ButtonMaker()
     if not is_user:
-        buttons.data_button("📜 TStats", f"status {sid} ov", position="header")
+        buttons.data_button("\U0001F4DC TStats", f"status {sid} ov", position="header", style=ButtonStyle.PRIMARY)
     if len(tasks) > STATUS_LIMIT:
         msg += f"<b>Page:</b> {page_no}/{pages} | <b>Tasks:</b> {tasks_no} | <b>Step:</b> {page_step}\n"
         buttons.data_button("<<", f"status {sid} pre", position="header")
@@ -301,8 +511,119 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
         for label, status_value in list(STATUSES.items()):
             if status_value != status:
                 buttons.data_button(label, f"status {sid} st {status_value}")
-    buttons.data_button("♻️ Refresh", f"status {sid} ref", position="header")
+    buttons.data_button(f"{GREEN_DOT} Refresh", f"status {sid} ref", position="header", style=ButtonStyle.SUCCESS)
     button = buttons.build_menu(8)
     msg += f"\n┟ <b>CPU</b> → {cpu_percent()}% | <b>F</b> → {get_readable_file_size(disk_usage(DOWNLOAD_DIR).free)} [{round(100 - disk_usage(DOWNLOAD_DIR).percent, 1)}%]"
     msg += f"\n┖ <b>RAM</b> → {virtual_memory().percent}% | <b>UP</b> → {get_readable_time(time() - bot_start_time)}"
+    active_count = len(non_queued_dl) + len(non_queued_up)
+    queue_count = len(queued_dl) + len(queued_up)
+    msg += f"\n<b>Active/Queued</b> -> {active_count}/{queue_count}"
+    try:
+        from .starfallx_upload import starfallx_upload
+
+        sfx = starfallx_upload.status_summary()
+        msg += (
+            f"\n<b>{sfx['engine']}</b> -> Helpers {sfx['helper_active']}"
+            f" | Ready {sfx.get('ready', 0)} | Main {sfx['main_active']}"
+            f" | Cooling {sfx['cooling']}"
+        )
+    except Exception:
+        pass
+    cleanup = {
+        "\u00e2\u201d\u2013": "-",
+        "\u00e2\u201d\u0178": "-",
+        "\u00e2\u201d\u00a0": "-",
+        "\u00e2\u2020\u2019": ":",
+        "\u00e2\u0152\u00ac": "",
+        "\u00e2\u00ac\u00a2": "■",
+        "\u00e2\u00ac\u00a1": "□",
+        "\u00f0\u0178\u201d\u00b4": "🔴",
+        "\u00f0\u0178\u201c\u0153": "",
+    }
+    for bad, good in cleanup.items():
+        msg = msg.replace(bad, good)
     return msg, button
+
+
+async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=1):
+    if _status_theme() != "starfall":
+        return await _get_readable_message_legacy(
+            sid, is_user, page_no, status, page_step
+        )
+
+    from ..telegram_helper.bot_commands import BotCommands
+
+    tasks = await get_specific_tasks(status, sid if is_user else None)
+    if not tasks and status == "All":
+        return None, None
+
+    limit = max(1, int(Config.STATUS_LIMIT or 10))
+    task_count = len(tasks)
+    cards = []
+    for number, task in enumerate(tasks, start=1):
+        task_status = (
+            await task.status()
+            if iscoroutinefunction(task.status)
+            else task.status()
+        )
+        cards.append(
+            _starfall_task_card(
+                number,
+                task,
+                task_status,
+                BotCommands.CancelTaskCommand[1],
+            )
+        )
+
+    footer = get_starfall_system_status()
+    if not cards:
+        cards.append(f"𝆺𝅥⃝🐦‍🔥❯ <b>No Active {escape(str(status))} Tasks!</b>")
+
+    card_pages = []
+    current_page = []
+    for card in cards:
+        candidate = "\n\n".join((*current_page, card, footer))
+        if current_page and (len(current_page) >= limit or len(candidate) > 3600):
+            card_pages.append(current_page)
+            current_page = []
+        current_page.append(card)
+    if current_page:
+        card_pages.append(current_page)
+
+    pages = len(card_pages)
+    page_no = ((page_no - 1) % pages) + 1
+    if sid in status_dict:
+        status_dict[sid]["page_no"] = page_no
+    chunks = card_pages[page_no - 1]
+    page_line = (
+        f"📄 <b>Page:</b> {page_no}/{pages} | <b>Tasks:</b> {task_count}"
+        if pages > 1
+        else ""
+    )
+
+    buttons = ButtonMaker()
+    if not is_user:
+        buttons.data_button(
+            "📊 TStats",
+            f"status {sid} ov",
+            position="header",
+            style=ButtonStyle.PRIMARY,
+        )
+    if pages > 1:
+        buttons.data_button("◀️", f"status {sid} pre", position="header")
+        buttons.data_button("▶️", f"status {sid} nex", position="header")
+    buttons.data_button(
+        "🟢 Refresh",
+        f"status {sid} ref",
+        position="header",
+        style=ButtonStyle.SUCCESS,
+    )
+    if status != "All" or task_count > 20:
+        for label, value in STATUSES.items():
+            if value != status:
+                buttons.data_button(label, f"status {sid} st {value}")
+    message_parts = list(chunks)
+    if page_line:
+        message_parts.append(page_line)
+    message_parts.append(footer)
+    return "\n\n".join(message_parts), buttons.build_menu(8)

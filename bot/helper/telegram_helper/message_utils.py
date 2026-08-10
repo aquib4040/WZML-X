@@ -1,9 +1,10 @@
 from asyncio import sleep, gather
+from random import choice
 from re import match as re_match
 from time import time
 
 from pyrogram.types import Message
-from pyrogram.enums import ParseMode
+from pyrogram.enums import ButtonStyle, ParseMode
 from pyrogram.errors import (
     FloodWait,
     MessageNotModified,
@@ -22,17 +23,55 @@ try:
 except ImportError:
     FloodPremiumWait = FloodWait
 
-from ... import LOGGER, intervals, status_dict, task_dict_lock
+from ... import (
+    LOGGER,
+    bot_cache,
+    categories_dict,
+    intervals,
+    status_dict,
+    task_dict_lock,
+    user_data,
+)
 from ...core.config_manager import Config
 from ...core.tg_client import TgClient
-from ..ext_utils.bot_utils import SetInterval
+from ..ext_utils.bot_utils import SetInterval, fetch_drive_cat
 from ..ext_utils.exceptions import TgLinkException
 from ..ext_utils.status_utils import get_readable_message
+from .button_build import ButtonMaker
+
+
+def _parse_chat_target(target):
+    if not isinstance(target, str):
+        return None
+    target = target.strip()
+    if not target:
+        return None
+    thread_id = None
+    if "|" in target:
+        target, thread = target.split("|", 1)
+        thread = thread.strip()
+        if thread.lstrip("-").isdigit():
+            thread_id = int(thread)
+    target = target.strip()
+    if target.lstrip("-").isdigit():
+        return int(target), thread_id
+    return None
 
 
 async def send_message(message, text, buttons=None, block=True, photo=None, **kwargs):
+    transient_attempt = int(kwargs.pop("_transient_attempt", 0) or 0)
+    text = _fit_telegram_text(text)
     try:
+        parsed_target = _parse_chat_target(message)
+        if parsed_target:
+            message, parsed_thread_id = parsed_target
+            if parsed_thread_id is not None:
+                kwargs.setdefault("message_thread_id", parsed_thread_id)
         if photo:
+            if photo == "IMAGES":
+                photo = choice(Config.IMAGES) if Config.IMAGES else None
+            if not photo:
+                return await send_message(message, text, buttons, block, None, **kwargs)
             try:
                 if isinstance(message, int):
                     return await TgClient.bot.send_photo(
@@ -57,7 +96,7 @@ async def send_message(message, text, buttons=None, block=True, photo=None, **kw
                 if not block:
                     return str(f)
                 await sleep(f.value * 1.2)
-                return await send_message(message, text, buttons, block, photo)
+                return await send_message(message, text, buttons, block, photo, **kwargs)
             except MediaCaptionTooLong:
                 return await send_message(
                     message,
@@ -68,10 +107,22 @@ async def send_message(message, text, buttons=None, block=True, photo=None, **kw
                 )
             except (PhotoInvalidDimensions, WebpageCurlFailed, MediaEmpty):
                 LOGGER.error("Invalid photo dimensions or empty media", exc_info=True)
-                return
-            except Exception:
+                return await send_message(message, text, buttons, block, None, **kwargs)
+            except Exception as error:
+                error_text = f"{type(error).__name__}: {error}".upper()
+                if "INTERDC" in error_text and transient_attempt < 2:
+                    await sleep(2 ** (transient_attempt + 1))
+                    return await send_message(
+                        message,
+                        text,
+                        buttons,
+                        block,
+                        photo,
+                        _transient_attempt=transient_attempt + 1,
+                        **kwargs,
+                    )
                 LOGGER.error("Error while sending photo", exc_info=True)
-                return
+                return await send_message(message, text, buttons, block, None, **kwargs)
         if isinstance(message, int):
             return await TgClient.bot.send_message(
                 chat_id=message,
@@ -79,7 +130,11 @@ async def send_message(message, text, buttons=None, block=True, photo=None, **kw
                 disable_web_page_preview=True,
                 disable_notification=True,
                 reply_markup=buttons,
+                **kwargs,
             )
+        if not hasattr(message, "reply"):
+            LOGGER.warning(f"send_message got invalid target: {type(message).__name__}")
+            return "Invalid message target"
         return await message.reply(
             text=text,
             quote=True,
@@ -105,11 +160,121 @@ async def send_message(message, text, buttons=None, block=True, photo=None, **kw
             return await send_message(message, text, buttons, block, photo)
         raise
     except Exception as e:
+        if "INTERDC" in f"{type(e).__name__}: {e}".upper() and transient_attempt < 2:
+            await sleep(2 ** (transient_attempt + 1))
+            return await send_message(
+                message,
+                text,
+                buttons,
+                block,
+                photo,
+                _transient_attempt=transient_attempt + 1,
+                **kwargs,
+            )
         LOGGER.error(str(e), exc_info=True)
         return str(e)
 
 
+async def open_category_btns(message):
+    user_id = message.from_user.id
+    msg_id = message.id
+    buttons = ButtonMaker()
+    cat_name = None
+    dcats = fetch_drive_cat(user_id)
+    default_id = user_data.get(user_id, {}).get("GDRIVE_ID") or Config.GDRIVE_ID
+    default_index = user_data.get(user_id, {}).get("INDEX_URL") or Config.INDEX_URL
+    merged = {
+        "Default": {"drive_id": default_id, "index_link": default_index},
+        **dcats,
+        **categories_dict,
+    }
+    for i, name in enumerate(merged):
+        if i == 0:
+            cat_name = name
+        buttons.data_button(
+            f"{'✓️' if i == 0 else ''} {name}",
+            f"scat {user_id} {msg_id} {name.replace(' ', '_')}",
+        )
+    buttons.data_button(
+        "Cancel",
+        f"scat {user_id} {msg_id} scancel",
+        "footer",
+        style=ButtonStyle.DANGER,
+    )
+    buttons.data_button(
+        "Done (60)",
+        f"scat {user_id} {msg_id} sdone",
+        "footer",
+        style=ButtonStyle.SUCCESS,
+    )
+    prompt = await send_message(
+        message,
+        f"<b>Select the category where you want to upload</b>\n\n"
+        f"<i><b>Upload Category:</b></i> <code>{cat_name or 'None'}</code>\n\n"
+        f"<b>Timeout:</b> 60 sec",
+        buttons.build_menu(3),
+    )
+    start_time = time()
+    bot_cache[msg_id] = [None, None, False, False, start_time]
+    while time() - start_time <= 60:
+        await sleep(0.5)
+        if bot_cache[msg_id][2] or bot_cache[msg_id][3]:
+            break
+    drive_id, index_link, _, is_cancelled, __ = bot_cache[msg_id]
+    if not is_cancelled:
+        await delete_message(prompt)
+    else:
+        await edit_message(prompt, "<b>Task Cancelled</b>")
+    del bot_cache[msg_id]
+    return drive_id, index_link, is_cancelled
+
+
+async def open_drive_clean(message):
+    user_id = message.from_user.id
+    msg_id = message.id
+    buttons = ButtonMaker()
+    dcats = fetch_drive_cat(user_id)
+    default_id = user_data.get(user_id, {}).get("GDRIVE_ID") or Config.GDRIVE_ID
+    merged = {"Default": {"drive_id": default_id}, **dcats, **categories_dict}
+    first_cat = None
+    for i, name in enumerate(merged):
+        if i == 0:
+            first_cat = name
+        buttons.data_button(
+            f"{'✓️' if i == 0 else ''} {name}",
+            f"gdccat {user_id} {msg_id} {name.replace(' ', '_')}",
+        )
+    buttons.data_button(
+        "Cancel",
+        f"gdccat {user_id} {msg_id} ccancel",
+        position="footer",
+        style=ButtonStyle.DANGER,
+    )
+    prompt = await send_message(
+        message,
+        f"<b>Select Drive Category to Clean</b>\n\n"
+        f"<b>Category:</b> <code>{first_cat or 'None'}</code>\n\n"
+        f"<b>Timeout:</b> 60 sec",
+        buttons.build_menu(3),
+    )
+    start_time = time()
+    bot_cache[msg_id] = [None, False, False, start_time]
+    while time() - start_time <= 60:
+        await sleep(0.5)
+        if bot_cache[msg_id][1] or bot_cache[msg_id][2]:
+            break
+    drive_id = bot_cache[msg_id][0]
+    is_cancelled = bot_cache[msg_id][1]
+    if not is_cancelled:
+        await delete_message(prompt)
+    else:
+        await edit_message(prompt, "<b>Task Cancelled</b>")
+    del bot_cache[msg_id]
+    return drive_id, is_cancelled
+
+
 async def edit_message(message, text, buttons=None, block=True):
+    text = _fit_telegram_text(text)
     try:
         return await message.edit(
             text=text,
@@ -130,6 +295,14 @@ async def edit_message(message, text, buttons=None, block=True):
     except Exception as e:
         LOGGER.error(str(e), exc_info=True)
         return str(e)
+
+
+def _fit_telegram_text(text, limit=4000):
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    suffix = "\n\n<code>... truncated ...</code>"
+    return text[: limit - len(suffix)] + suffix
 
 
 async def edit_reply_markup(message, buttons):
@@ -166,8 +339,7 @@ async def send_file(message, file, caption="", buttons=None):
 
 async def send_rss(text, chat_id, thread_id):
     try:
-        app = TgClient.user or TgClient.bot
-        return await app.send_message(
+        return await TgClient.bot.send_message(
             chat_id=chat_id,
             text=text,
             disable_web_page_preview=True,
@@ -177,7 +349,7 @@ async def send_rss(text, chat_id, thread_id):
     except (FloodWait, FloodPremiumWait) as f:
         LOGGER.warning(str(f))
         await sleep(f.value * 1.2)
-        return await send_rss(text)
+        return await send_rss(text, chat_id, thread_id)
     except Exception as e:
         LOGGER.error(str(e), exc_info=True)
         return str(e)
@@ -335,6 +507,8 @@ async def update_status_message(sid, force=False):
 
 async def send_status_message(msg, user_id=0):
     if intervals["stopAll"]:
+        return
+    if getattr(msg, "_rss_auto_leech", False):
         return
     sid = user_id or msg.chat.id
     is_user = bool(user_id)

@@ -31,14 +31,20 @@ from ...core.tg_client import TgClient
 
 
 class HyperTGDownload:
-    def __init__(self):
-        self.clients = TgClient.helper_bots
-        self.work_loads = TgClient.helper_loads
+    def __init__(self, clients=None, work_loads=None, num_parts=None):
+        if clients is None:
+            self.clients = TgClient.helper_bots
+            self.work_loads = (
+                TgClient.helper_loads if work_loads is None else work_loads
+            )
+        else:
+            self.clients = clients
+            self.work_loads = work_loads or {key: 0 for key in self.clients}
         self.message = None
         self.dump_chat = None
         self.download_dir = "downloads/"
         self.directory = None
-        self.num_parts = Config.HYPER_THREADS or max(8, len(self.clients))
+        self.num_parts = num_parts or Config.HYPER_THREADS or max(8, len(self.clients))
         self.cache_file_ref = {}
         self.cache_last_access = {}
         self.cache_max_size = 100

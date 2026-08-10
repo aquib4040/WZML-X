@@ -1,5 +1,5 @@
 from aiofiles.os import remove, path as aiopath
-from asyncio import iscoroutinefunction
+from asyncio import create_task, iscoroutinefunction
 
 from .. import (
     task_dict,
@@ -9,6 +9,7 @@ from .. import (
     sabnzbd_client,
 )
 from ..core.config_manager import Config
+from ..core.tg_client import TgClient
 from ..core.torrent_manager import TorrentManager
 from ..helper.ext_utils.bot_utils import (
     bt_selection_buttons,
@@ -28,20 +29,29 @@ async def select(_, message):
         await send_message(message, "Base URL not defined!")
         return
     user_id = message.from_user.id
-    msg = message.text.split()
+    text = message.text
+    if " " in text.split("\n")[0]:
+        text = text.replace(" ", "_", 1)
+    msg = text.split("_", maxsplit=1)
+    gid = None
+    task = None
     if len(msg) > 1:
-        gid = msg[1]
-        task = await get_task_by_gid(gid)
-        if task is None:
-            await send_message(message, f"GID: <code>{gid}</code> Not Found.")
+        cmd_data = msg[1].split("@", maxsplit=1)
+        if len(cmd_data) > 1 and cmd_data[1].strip() != TgClient.BNAME:
             return
-    elif reply_to_id := message.reply_to_message_id:
+        gid = cmd_data[0].split()[0]
+        if gid:
+            task = await get_task_by_gid(gid)
+            if task is None:
+                await send_message(message, f"GID: <code>{gid}</code> Not Found.")
+                return
+    if task is None and (reply_to_id := message.reply_to_message_id):
         async with task_dict_lock:
             task = task_dict.get(reply_to_id)
         if task is None:
             await send_message(message, "This is not an active task!")
             return
-    elif len(msg) == 1:
+    if task is None:
         msg = (
             "Reply to an active /cmd which was used to start the download or add gid along with cmd\n\n"
             + "This command mainly for selection incase you decided to select files from already added torrent/nzb. "
@@ -57,7 +67,7 @@ async def select(_, message):
         await send_message(message, "This task is not for you!")
         return
     if not iscoroutinefunction(task.status):
-        await send_message(message, "The task have finshed the download stage!")
+        await send_message(message, "The task has finished the download stage!")
         return
     if await task.status() not in [
         MirrorStatus.STATUS_DOWNLOAD,
@@ -66,7 +76,7 @@ async def select(_, message):
     ]:
         await send_message(
             message,
-            "Task should be in download or pause (incase message deleted by wrong) or queued status (incase you have used torrent or nzb file)!",
+            "Task should be in download or pause (in case message was deleted by mistake) or queued status (in case you have used torrent or nzb file)!",
         )
         return
     if task.name().startswith("[METADATA]") or task.name().startswith("Trying"):
@@ -95,7 +105,7 @@ async def select(_, message):
         return
 
     SBUTTONS = bt_selection_buttons(id_)
-    msg = "Your download paused. Choose files then press Done Selecting button to resume downloading."
+    msg = "<b>Download Paused!</b>\n\n<i>Select your files &amp; press <b>Done Selecting</b> to start.</i>"
     await send_message(message, msg, SBUTTONS)
 
 
@@ -104,6 +114,35 @@ async def confirm_selection(_, query):
     user_id = query.from_user.id
     data = query.data.split()
     message = query.message
+    if len(data) < 3:
+        await query.answer("Malformed selection request", show_alert=True)
+        return
+    if data[2].startswith("mega_"):
+        from ..helper.mirror_leech_utils.download_utils.mega_download import (
+            cancel_mega_selection,
+            get_mega_selection_owner_id,
+            resume_mega_with_selection,
+        )
+
+        real_gid = data[2][5:]
+        owner_id = get_mega_selection_owner_id(real_gid)
+        if owner_id is None:
+            await query.answer("This MEGA selection expired", show_alert=True)
+            await delete_message(message)
+            return
+        if user_id != owner_id:
+            await query.answer("This task is not for you!", show_alert=True)
+            return
+        if data[1] == "pin":
+            await query.answer(data[3] if len(data) > 3 else "", show_alert=True)
+            return
+        await query.answer()
+        if data[1] == "done":
+            create_task(resume_mega_with_selection(real_gid))
+        else:
+            await cancel_mega_selection(real_gid)
+        await delete_message(message)
+        return
     task = await get_task_by_gid(data[2])
     if task is None:
         await query.answer("This task has been cancelled!", show_alert=True)

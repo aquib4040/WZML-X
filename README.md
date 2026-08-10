@@ -59,7 +59,6 @@
 | Runtime | Python Telegram bot + web UI |
 | Deployment | Docker & Docker Compose |
 | Required config | `BOT_TOKEN`, `TELEGRAM_API`, `TELEGRAM_HASH`, `OWNER_ID`, `DATABASE_URL` |
-| Port controls | `BASE_URL_PORT`, `RCLONE_SERVE_PORT` |
 | License | [LICENSE](LICENSE) |
 
 ## Why Use It
@@ -93,41 +92,89 @@ Deploy with Docker and provide the required configuration values. The container 
 ## Deployment
 
 <details open>
-   <summary>Recommended: Docker Compose</summary>
+   <summary>VPS / Dedicated Server (Recommended)</summary>
 
    ```bash
    git clone https://github.com/SilentDemonSD/WZML-X.git
    cd WZML-X
-   docker compose up --build
+   cp config_sample.py config.py
+   # Edit config.py with your values
+   docker compose up -d --build
    ```
 
-   Use this when you want the simplest full deployment path.
+   The bot runs behind a Cloudflare quick tunnel by default. Check the tunnel URL:
+
+   ```bash
+   docker compose logs tunnel
+   ```
+
+   You'll see a `https://*.trycloudflare.com` URL. That's your bot's web UI.
+
+   To stop:
+
+   ```bash
+   docker compose down
+   ```
 </details>
 
 <details>
-   <summary>Single Container</summary>
+   <summary>VPS with VPN (Gluetun)</summary>
+
+   1. Uncomment the `gluetun` service in `docker-compose.yml`
+   2. Fill in your VPN provider credentials
+   3. Set `network_mode: "service:gluetun"` on the `app` service
+   4. Start:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+   All traffic (including the cloudflared tunnel) routes through the VPN.
+</details>
+
+<details>
+   <summary>Multi-Instance (Multiple Bots)</summary>
+
+   Each bot needs its own `config.py` and data volumes. Example for a second bot:
+
+   1. Create `config2.py` with different `BOT_TOKEN`, `OWNER_ID`, etc.
+   2. Uncomment `app2` and `tunnel2` in `docker-compose.yml`
+   3. Edit volume mounts to use `config2.py` and separate data dirs
+   4. Start:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+   Each bot gets its own cloudflared tunnel URL. Admin ports (qBittorrent, SABnzbd) are mapped to different host ports (`127.0.0.1:8091`, etc.).
+</details>
+
+<details>
+   <summary>Single Container (Manual)</summary>
 
    ```bash
    git clone https://github.com/SilentDemonSD/WZML-X.git
    cd WZML-X
+   cp config_sample.py config.py
    docker build -t wzmlx .
-   docker run -p 80:80 -p 8080:8080 wzmlx
+   docker run --rm -p 8080:8080 \
+      -v "$PWD/config.py:/usr/src/app/config.py:ro" \
+      -v "$PWD/downloads:/usr/src/app/downloads" \
+      -v "$PWD/logs:/usr/src/app/logs" \
+      wzmlx
    ```
-
-   Use this if you want a manual one-container deployment.
 </details>
 
 <details>
    <summary>Deployment Notes</summary>
 
-   1. Set `BASE_URL_PORT` and `RCLONE_SERVE_PORT` to match the ports you want to expose.
-   2. If you use qBittorrent, tune `AsyncIOThreadsCount` to your machine size.
-   3. Stop the container before removing it, and remove the container before pruning images.
-   4. Useful cleanup commands:
+   1. If you use qBittorrent, tune `AsyncIOThreadsCount` to your machine size.
+   2. Stop the container before removing it, and remove the container before pruning images.
+   3. Useful cleanup commands:
 
    ```bash
-   sudo docker container prune
-   sudo docker image prune -a
+   docker container prune
+   docker image prune -a
    ```
 </details>
 
@@ -165,7 +212,6 @@ Then tune the optional behavior from `config_sample.py`.
    | `QUEUE_ALL`, `QUEUE_DOWNLOAD`, `QUEUE_UPLOAD` | Queue pressure and concurrency |
    | `SHOW_CLOUD_LINK` | Whether cloud links are shown to users |
    | `WEB_PINCODE` | Protects web access to file selection |
-   | `UPDATE_PKGS` | Package refresh behavior during startup |
 </details>
 
 <details>
@@ -189,8 +235,8 @@ Then tune the optional behavior from `config_sample.py`.
 | `web/` | FastAPI app, templates, and the file selector UI |
 | `gen_scripts/` | Setup helpers for sessions, tokens, and drive configuration |
 | `plugins/` | Optional bot plugins |
-| `qBittorrent/` | Default qBittorrent configuration |
-| `sabnzbd/` | Default SABnzbd configuration |
+| `configs/qbittorrent/` | Default qBittorrent configuration |
+| `configs/sabnzbd/` | Default SABnzbd configuration |
 
 ## Documentation
 
@@ -198,6 +244,8 @@ Then tune the optional behavior from `config_sample.py`.
 > This documentation is still being expanded.
 
 - Full guides: `docs/`
+- Fresh VPS Docker guide: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
+- Audit changelog: [`docs/AUDIT_CHANGELOG.md`](docs/AUDIT_CHANGELOG.md)
 - Deployment notes: the docs site linked from the repository at WZ Docs
 - Configuration reference: `config_sample.py`
 

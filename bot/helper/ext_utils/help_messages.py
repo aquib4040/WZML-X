@@ -39,6 +39,10 @@ You can use this arg also to move multiple links/torrents contents to the same d
 /cmd -i 10(number of links/files) -m folder name (all links contents in one folder)
 /cmd -b -m folder name (reply to batch of message/file(each link on new line))
 
+Bare <code>-m</code> has media-aware behavior:
+/cmd link -m (one video: open Manual Merge Tracks)
+/cmd -i 10 -m (multiple videos: concatenate in order)
+
 While using bulk you can also use this arg with different folder name along with the links in message or file batch
 Example:
 link1 -m folder1
@@ -49,13 +53,14 @@ link5 -m folder3
 link6
 so link1 and link2 content will be uploaded from same folder which is folder1
 link3 and link4 content will be uploaded from same folder also which is folder2
-link5 will uploaded alone inside new folder named folder3
+link5 will be uploaded alone inside new folder named folder3
 link6 will get uploaded normally alone
 """
 
 thumb = """<b>Thumbnail for current task</b>: -t
 
 /cmd link -t image-url or tg-message-link (doc or photo) or none (file without thumb)
+Reply to a photo/image document with <code>-t</code> to save it as your persistent custom thumbnail.
 Supports any direct image URL (jpg, png, webp, etc.) or a Telegram message link containing a photo/document."""
 
 split_size = """<b>Split size for current task</b>: -sp
@@ -77,7 +82,7 @@ To add leech destination:
 -up id/@username/pm
 -up b:id/@username/pm (b: means leech by bot) (id or username of the chat or write pm means private message so bot will send the files in private to you)
 when you should use b:(leech by bot)? When your default settings is leech by user and you want to leech by bot for specific task.
--up u:id/@username(u: means leech by user) This incase OWNER added USER_STRING_SESSION.
+-up u:id/@username(u: means leech by user) This in case OWNER added USER_STRING_SESSION.
 -up h:id/@username(hybrid leech) h: to upload files by bot and user based on file size.
 -up id/@username|topic_id(leech in specific chat and topic) add | without space and write topic id after chat id or username.
 
@@ -87,10 +92,10 @@ DEFAULT_UPLOAD doesn't affect on leech cmds.
 
 user_download = """<b>User Download</b>: link
 
-/cmd tp:link to download using owner token.pickle incase service account enabled.
-/cmd sa:link to download using service account incase service account disabled.
-/cmd tp:gdrive_id to download using token.pickle and file_id incase service account enabled.
-/cmd sa:gdrive_id to download using service account and file_id incase service account disabled.
+/cmd tp:link to download using owner token.pickle in case service account enabled.
+/cmd sa:link to download using service account in case service account disabled.
+/cmd tp:gdrive_id to download using token.pickle and file_id in case service account enabled.
+/cmd sa:gdrive_id to download using service account and file_id in case service account disabled.
 /cmd mtp:gdrive_id or mtp:link to download using user token.pickle uploaded from usetting
 /cmd mrcc:remote:path to download using user rclone config uploaded from usetting
 you can simply edit upload using owner/user token/config from usetting without adding mtp: or mrcc: before the path/id"""
@@ -110,13 +115,13 @@ link2 -z -n new name -up remote2:path2
 link3 -e -n new name -up remote2:path2
 Reply to this example by this cmd -> /cmd -b(bulk)
 
-Note: Any arg along with the cmd will be setted to all links
+Note: Any arg along with the cmd will be set to all links
 /cmd -b -up remote: -z -m folder name (all links contents in one zipped folder uploaded to one destination)
-so you can't set different upload destinations along with link incase you have added -m along with cmd
+so you can't set different upload destinations along with link in case you have added -m along with cmd
 You can set start and end of the links from the bulk like seed, with -b start:end or only end by -b :end or only start by -b start.
 The default start is from zero(first link) to inf."""
 
-rlone_dl = """<b>Rclone Download</b>:
+rclone_dl = """<b>Rclone Download</b>:
 
 Treat rclone paths exactly like links
 /cmd main:dump/ubuntu.iso or rcl(To select config, remote and path)
@@ -217,7 +222,7 @@ You can simply edit using owner/user config from usetting without adding mrcc: b
 name_swap = r"""<b>Name Substitution</b>: -ns
 /cmd link -ns script/code/s | mirror/leech | tea/ /s | clone | cpu/ | \[mltb\]/mltb | \\text\\/text/s
 This will affect on all files. Format: wordToReplace/wordToReplaceWith/sensitiveCase
-Word Subtitions. You can add pattern instead of normal text. Timeout: 60 sec
+Word Substitutions. You can add pattern instead of normal text. Timeout: 60 sec
 NOTE: You must add \ before any character, those are the characters: \^$.|?*+()[]{}-
 1. script will get replaced by code with sensitive case
 2. mirror will get replaced by leech
@@ -229,9 +234,9 @@ NOTE: You must add \ before any character, those are the characters: \^$.|?*+()[
 """
 
 transmission = """<b>Tg transmission</b>: -hl -ut -bt
-/cmd link -hl (leech by user and bot session with respect to size) (Hybrid Leech)
-/cmd link -bt (leech by bot session)
-/cmd link -ut (leech by user)"""
+/cmd link -hl (both: user for >2GB, bot for ≤2GB)
+/cmd link -bt (bot only)
+/cmd link -ut (user only)"""
 
 thumbnail_layout = """Thumbnail Layout: -tl
 /cmd link -tl 3x3 (widthxheight) 3 photos in row and 3 photos in column"""
@@ -247,9 +252,9 @@ Notes:
 3. To execute one of pre-added lists in bot like: ({"subtitle": ["-i mltb.mkv -c copy -c:s srt mltb.mkv"]}), you must use -ff subtitle (list key)
 Examples: ["-i mltb.mkv -c copy -c:s srt mltb.mkv", "-i mltb.video -c copy -c:s srt mltb", "-i mltb.m4a -c:a libmp3lame -q:a 2 mltb.mp3", "-i mltb.audio -c:a libmp3lame -q:a 2 mltb.mp3", "-i mltb -map 0:a -c copy mltb.mka -map 0:s -c copy mltb.srt"]
 Here I will explain how to use mltb.* which is reference to files you want to work on.
-1. First cmd: the input is mltb.mkv so this cmd will work only on mkv videos and the output is mltb.mkv also so all outputs is mkv. -del will delete the original media after complete run of the cmd.
-2. Second cmd: the input is mltb.video so this cmd will work on all videos and the output is only mltb so the extenstion is same as input files.
-3. Third cmd: the input in mltb.m4a so this cmd will work only on m4a audios and the output is mltb.mp3 so the output extension is mp3.
+1. First cmd: the input is mltb.mkv so this cmd will work only on mkv videos and the output is mltb.mkv also so all outputs are mkv. -del will delete the original media after complete run of the cmd.
+2. Second cmd: the input is mltb.video so this cmd will work on all videos and the output is only mltb so the extension is the same as input files.
+3. Third cmd: the input is mltb.m4a so this cmd will work only on m4a audios and the output is mltb.mp3 so the output extension is mp3.
 4. Fourth cmd: the input is mltb.audio so this cmd will work on all audios and the output is mltb.mp3 so the output extension is mp3."""
 
 metadata = """<b>Metadata</b>: -meta
@@ -284,6 +289,67 @@ Set different metadata for audio/video/subtitle streams in User Settings > FFmpe
 • Video Metadata: <code>title={basename}|year={year}</code>
 • Subtitle Metadata: <code>language={sublang}|title=Subtitles</code>"""
 
+auto_process = """<b>Auto Process</b>
+Configure in /usettings > Auto Process.
+
+Order:
+download -> unzip -> order tracks -> remove streams -> smart merge -> intro subtitle -> metadata -> auto rename -> sequential upload
+
+Notes:
+1. Smart merge batches episodes under Telegram max size minus AUTO_MERGE_SAFETY_MB.
+2. Range names use <code>[S1-EP(01-06)]</code> and never mix seasons.
+3. Subtitle translate uses LIBRE_TRANSLATE_API_URL and optional LIBRE_TRANSLATE_API_KEY from config.py.
+4. Intro subtitles use INTRO_SUBTITLE_RANGES and fade in/out as a muxed subtitle track.
+5. Auto rename and auto thumbnail use TMDb first, then AniList/MyAnimeList, then filename/video-frame fallback.
+6. AutoLeech can start leech tasks from plain links/files for authorized users when AUTO_LEECH is enabled.
+7. Caption <code>{filename}</code> keeps the full final name with prefix/suffix; <code>{upload_filename}</code> is the shortened Telegram filename.
+
+AutoRename variables include:
+<code>{file_name}</code> <code>{file_size}</code> <code>{file_caption}</code> <code>{languages}</code> <code>{subtitles}</code> <code>{duration}</code> <code>{ott}</code> <code>{resolution}</code> <code>{name}</code> <code>{title}</code> <code>{year}</code> <code>{quality}</code> <code>{DS4K}</code> <code>{season}</code> <code>{episode}</code> <code>{audio}</code> <code>{lib}</code> <code>{extension}</code> <code>{shortsub}</code> <code>{shortlang}</code> <code>{part}</code> <code>{raw_name}</code> <code>{link}</code> <code>{vcodec}</code> <code>{codec}</code> <code>{acodec}</code> <code>{audio_codec}</code> <code>{audio_channels}</code> <code>{audio_bitrate}</code> <code>{hdr}</code> <code>{dynamic_range}</code> <code>{release_group}</code> <code>{group}</code>."""
+
+starfallx_video_tools = """<b>StarFallX Video Tools</b>: -vt
+
+Use <code>/cmd link -vt</code>. If streams are not ready, the bot waits for download/extract to finish and opens the menu later.
+
+Tools: Remove Stream, Extract Stream, Change Order, Audio Order, Subtitle Order, Merge Tracks, Translate Subs, Video + Video.
+
+Extract Stream is exclusive and uploads only extracted audio/subtitle artifacts."""
+
+starfallx_autorename = """<b>StarFallX AutoRename</b>
+
+Task override:
+<code>/cmd link -ar custom [S{season}E{episode}] {name} {resolution} {DS4K} {codec}</code>
+
+Reverse create can turn a sample filename into a template. Missing variables render blank.
+
+Useful variables:
+<code>{name}</code> <code>{title}</code> <code>{year}</code> <code>{season}</code> <code>{episode}</code> <code>{resolution}</code> <code>{quality}</code> <code>{DS4K}</code> <code>{codec}</code> <code>{audio_codec}</code> <code>{audio_channels}</code> <code>{shortsub}</code> <code>{release_group}</code>."""
+
+starfallx_batch = """<b>StarFallX Batch Leech</b>
+
+<code>/bleech link1 link2 link3</code> runs many links with BLEECH download/upload limits.
+
+<code>/bqleech magnet</code> is qB-only huge torrent batching using <code>BQLEECH_BATCH_SIZE_GB</code>.
+
+Restart recovery can resume these plans when <code>BATCH_TASK_RESTART_RESUME</code> is enabled."""
+
+starfallx_thumbnail = """<b>StarFallX Auto Thumbnail</b>
+
+Priority: custom user thumb -> TMDb -> AniList -> MyAnimeList -> FFmpeg frame.
+
+Provider images are saved from HD sources. Document thumbs are resized only when Telegram requires a small thumbnail."""
+
+starfallx_upload = """<b>StarFallX Upload Engine</b>
+
+Helper bot tokens improve parallel multi-file uploads, not one-file speed.
+
+Rules:
+1. One helper token = one active upload.
+2. Normal users use their own helper tokens.
+3. Owner/sudo can use approved helper pool.
+4. 2GB+ uploads need premium user session or split fallback.
+5. Add helper bots to LEECH_DUMP_CHAT for sequential dump/copy support."""
+
 YT_HELP_DICT = {
     "main": yt,
     "New-Name": f"{new_name}\nNote: Don't add file extension",
@@ -307,6 +373,12 @@ YT_HELP_DICT = {
     "Leech-Type": leech_as,
     "FFmpeg-Cmds": ffmpeg_cmds,
     "Metadata": metadata,
+    "Auto-Process": auto_process,
+    "StarFallX-VideoTools": starfallx_video_tools,
+    "StarFallX-AutoRename": starfallx_autorename,
+    "StarFallX-Batch": starfallx_batch,
+    "StarFallX-Thumbnail": starfallx_thumbnail,
+    "StarFallX-Upload": starfallx_upload,
 }
 
 MIRROR_HELP_DICT = {
@@ -325,7 +397,7 @@ MIRROR_HELP_DICT = {
     "Rclone-Flags": rcf,
     "Bulk": bulk,
     "Join": join,
-    "Rclone-DL": rlone_dl,
+    "Rclone-DL": rclone_dl,
     "Tg-Links": tg_links,
     "Sample-Video": sample_video,
     "Screenshot": screenshot,
@@ -338,6 +410,12 @@ MIRROR_HELP_DICT = {
     "Leech-Type": leech_as,
     "FFmpeg-Cmds": ffmpeg_cmds,
     "Metadata": metadata,
+    "Auto-Process": auto_process,
+    "StarFallX-VideoTools": starfallx_video_tools,
+    "StarFallX-AutoRename": starfallx_autorename,
+    "StarFallX-Batch": starfallx_batch,
+    "StarFallX-Thumbnail": starfallx_thumbnail,
+    "StarFallX-Upload": starfallx_upload,
 }
 
 CLONE_HELP_DICT = {
@@ -358,11 +436,14 @@ Title3 link -c cmd -d ratio:time -z password
 -inf For included words filter.
 -exf For excluded words filter.
 -stv true or false (sensitive filter)
+-al true or false (owner/sudo RSS auto-leech into RSS_CHAT)
+-lb bot or user (RSS upload client; bot is default and does not need user session)
+-ar title, remove_dots, or none (RSS auto-leech filename source)
 
-Example: Title https://www.rss-url.com -inf 1080 or 720 or 144p|mkv or mp4|hevc -exf flv or web|xxx
+Example: Title https://www.rss-url.com -al true -lb bot -ar title -inf 1080 or 720 or 144p|mkv or mp4|hevc -exf flv or web|xxx
 This filter will parse links that its titles contain `(1080 or 720 or 144p) and (mkv or mp4) and hevc` and doesn't contain (flv or web) and xxx words. You can add whatever you want.
 
-Another example: -inf  1080  or 720p|.web. or .webrip.|hvec or x264. This will parse titles that contain ( 1080  or 720p) and (.web. or .webrip.) and (hvec or x264). I have added space before and after 1080 to avoid wrong matching. If this `10805695` number in title it will match 1080 if added 1080 without spaces after it.
+Another example: -inf  1080  or 720p|.web. or .webrip.|hevc or x264. This will parse titles that contain ( 1080  or 720p) and (.web. or .webrip.) and (hevc or x264). I have added space before and after 1080 to avoid wrong matching. If this `10805695` number in title it will match 1080 if added 1080 without spaces after it.
 
 Filter Notes:
 1. | means and.
@@ -390,6 +471,8 @@ def get_bot_commands():
         "UpHoster": "[link/file] Upload to DDL Servers",
         "Leech": "[link/file] Leech files to Upload to Telegram",
         "QbLeech": "[magnet/torrent] Leech files to Upload to Telegram using qbit",
+        "BigQLeech": "[magnet/torrent] Leech huge qB torrents in safe 30GB batches",
+        "BatchLeech": "[links] Leech multiple links with download/upload batch limits",
         "YtdlLeech": "[link] Leech YouTube, m3u8, Social Media and yt-dlp supported urls",
         "Clone": "[link] Clone files/folders to GDrive",
         "UserSet": "User personal settings",
@@ -397,6 +480,7 @@ def get_bot_commands():
         "Count": "[link] Count no. of files/folders in GDrive",
         "List": "[query] Search any Text which is available in GDrive",
         "Search": "[query] Search torrents via Qbit Plugins",
+        "CreateTorrent": "[link/reply] Create torrent release pack",
         "MediaInfo": "[reply/link] Get MediaInfo of the Target Media",
         "Select": "[gid/reply] Select files for NZB, Aria2, Qbit Tasks",
         "Ping": "Ping Bot to test Response Speed",
@@ -404,12 +488,15 @@ def get_bot_commands():
         "Stats": "Bot, OS, Repo & System full Statistics",
         "Rss": "User RSS Management Settings",
         "IMDB": "[query] or ttxxxxxx Get IMDB info",
+        "Poster": "[query/reply] Search and save edited poster thumbnail",
+        "Sites": "Show owner-configured useful website links",
         "CancelAll": "Cancel all Tasks on the Bot",
         "Help": "Detailed help usage of the WZ Bot",
         "BotSet": "[SUDO] Bot Management Settings",
         "Log": "[SUDO] Get Bot Logs for Internal Working",
         "Restart": "[SUDO] Reboot bot",
         "RestartSessions": "[SUDO] Reboot User Sessions",
+        "GenPyroSess": "[SUDO] Generate Pyrogram String Session",
     }
 
     commands = static_commands.copy()
@@ -419,8 +506,11 @@ def get_bot_commands():
         for plugin_info in plugin_manager.list_plugins():
             if plugin_info.enabled and plugin_info.commands:
                 for cmd in plugin_info.commands:
-                    if cmd == "speedtest":
-                        commands["SpeedTest"] = "Check Bot Speed using Speedtest.com"
+                    key = cmd.capitalize()
+                    if key not in commands:
+                        commands[key] = (
+                            plugin_info.description or f"Plugin command: {cmd}"
+                        )
 
     return commands
 
@@ -431,7 +521,7 @@ BOT_COMMANDS = get_bot_commands()
 def get_help_string():
     from ..telegram_helper.bot_commands import BotCommands
 
-    help_lines = ["NOTE: Try each command without any argument to see more detalis."]
+    help_lines = ["NOTE: Try each command without any argument to see more details."]
 
     commands = BotCommands.get_commands()
 
@@ -445,9 +535,7 @@ def get_help_string():
         else:
             cmd_str = f"/{cmd_attr}"
 
-        if key == "SpeedTest" and key in BOT_COMMANDS:
-            help_lines.append(f"{cmd_str}: Check Bot Speed using Speedtest.com")
-        elif key == "Mirror":
+        if key == "Mirror":
             help_lines.append(f"{cmd_str}: Start mirroring to cloud.")
         elif key == "QbMirror":
             help_lines.append(f"{cmd_str}: Start Mirroring to cloud using qBittorrent.")
@@ -463,6 +551,14 @@ def get_help_string():
             help_lines.append(f"{cmd_str}: Start leeching to Telegram.")
         elif key == "QbLeech":
             help_lines.append(f"{cmd_str}: Start leeching using qBittorrent.")
+        elif key == "BigQLeech":
+            help_lines.append(
+                f"{cmd_str}: qB-only huge torrent leech. Downloads/uploads natural-order batches up to BQLEECH_BATCH_SIZE_GB."
+            )
+        elif key == "BatchLeech":
+            help_lines.append(
+                f"{cmd_str} link1 link2 link3: Batch leech links with BLEECH download/upload limits."
+            )
         elif key == "JdLeech":
             help_lines.append(f"{cmd_str}: Start leeching using JDownloader.")
         elif key == "NzbLeech":
@@ -499,6 +595,10 @@ def get_help_string():
             help_lines.append(f"{cmd_str} [query]: Search in Google Drive(s).")
         elif key == "Search":
             help_lines.append(f"{cmd_str} [query]: Search for torrents with API.")
+        elif key == "CreateTorrent":
+            help_lines.append(
+                f"{cmd_str} [link/reply]: Save video for seeding, send HD thumbnail, header contact sheet, BBCode description, and .torrent file."
+            )
         elif key == "MediaInfo":
             help_lines.append(f"{cmd_str} [query]: Get media info.")
         elif key == "Status":
@@ -525,6 +625,20 @@ def get_help_string():
             help_lines.append(f"{cmd_str}: Add sudo user (Only Owner).")
         elif key == "RmSudo":
             help_lines.append(f"{cmd_str}: Remove sudo users (Only Owner).")
+        elif key == "BlackList":
+            help_lines.append(
+                f"{cmd_str}: Blacklist a user from using the bot (Only Owner & Sudo)."
+            )
+        elif key == "RmBlackList":
+            help_lines.append(
+                f"{cmd_str}: Remove a user from blacklist (Only Owner & Sudo)."
+            )
+        elif key == "AddImage":
+            help_lines.append(
+                f"{cmd_str}: Add an image to the gallery by reply to photo or link."
+            )
+        elif key == "Images":
+            help_lines.append(f"{cmd_str}: View and manage the image gallery.")
         elif key == "Restart":
             help_lines.append(
                 f"{cmd_str}: Restart and update the bot (Only Owner & Sudo)."
@@ -545,7 +659,29 @@ def get_help_string():
             )
         elif key == "Rss":
             help_lines.append(f"/{BotCommands.RssCommand}: RSS Menu.")
+        elif key == "GenPyroSess":
+            help_lines.append(
+                f"/{BotCommands.GenPyroSessCommand}: Generate Pyrogram String Session (Only Owner & Sudo)."
+            )
+        elif key in BOT_COMMANDS:
+            help_lines.append(f"{cmd_str}: {BOT_COMMANDS[key]}")
 
+    help_lines.extend(
+        [
+            "",
+            "<b>StarFallX v1.2 quick guide</b>",
+            f"/{BotCommands.LeechCommand[0]} link -vt: open Video Tools after download. Extract Stream is exclusive.",
+            f"/{BotCommands.LeechCommand[0]} link -ar custom TEMPLATE: one-task AutoRename template.",
+            f"/{BotCommands.BatchLeechCommand[0]} link1 link2 link3: batch leech with download/upload limits.",
+            f"/{BotCommands.BigQLeechCommand[0]} magnet: qB huge torrent batching; /bql and /bqbleech also work.",
+            f"/{BotCommands.CreateTorrentCommand[0]} link: create thumbnail, contact sheet, BBCode description, and torrent.",
+            "Auto Process flow: download -> unzip -> order -> remove streams -> merge -> intro -> metadata -> rename -> sequential upload.",
+            "Auto Thumbnail flow: custom thumb -> TMDb -> AniList -> MyAnimeList -> FFmpeg frame.",
+            "Upload engine: StarFallX helper tokens improve parallel multi-file uploads; one token handles one active upload.",
+            "Restart recovery: /bleech and /bqleech plans can resume. Normal single /leech replay is notifier-only to avoid duplicate uploads.",
+            "Use /usetting for Leech, Auto Process, Helper Token, caption, thumbnail, zip export/import, and user upload options.",
+        ]
+    )
     return "\n".join(help_lines)
 
 

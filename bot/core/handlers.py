@@ -1,9 +1,11 @@
 # ruff: noqa: F403, F405
 
-from pyrogram.filters import command, regex
+from pyrogram.filters import command, create, regex
 from pyrogram.handlers import CallbackQueryHandler, EditedMessageHandler, MessageHandler
 from pyrogram.types import BotCommand
+from inspect import isawaitable
 
+from .. import bot_loop
 from ..core.config_manager import Config
 from ..helper.ext_utils.help_messages import BOT_COMMANDS
 from ..helper.telegram_helper.bot_commands import BotCommands
@@ -52,7 +54,7 @@ def add_handlers():
         MessageHandler(
             broadcast,
             filters=command(BotCommands.BroadcastCommand, case_sensitive=True)
-            & CustomFilters.sudo,
+            & CustomFilters.owner,
         )
     )
     TgClient.bot.add_handler(
@@ -194,6 +196,20 @@ def add_handlers():
     )
     TgClient.bot.add_handler(
         MessageHandler(
+            bq_leech,
+            filters=command(BotCommands.BigQLeechCommand, case_sensitive=True)
+            & CustomFilters.authorized,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            batch_leech,
+            filters=command(BotCommands.BatchLeechCommand, case_sensitive=True)
+            & CustomFilters.authorized,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
             jd_leech,
             filters=command(BotCommands.JdLeechCommand, case_sensitive=True)
             & CustomFilters.authorized,
@@ -235,6 +251,20 @@ def add_handlers():
             & CustomFilters.owner,
         )
     )
+    # Hidden owner-only alias for pasting shell commands from Telegram.
+    ssh_command = f"ssh{Config.CMD_SUFFIX}"
+    TgClient.bot.add_handler(
+        MessageHandler(
+            run_shell,
+            filters=command(ssh_command, case_sensitive=True) & CustomFilters.owner,
+        )
+    )
+    TgClient.bot.add_handler(
+        EditedMessageHandler(
+            run_shell,
+            filters=command(ssh_command, case_sensitive=True) & CustomFilters.owner,
+        )
+    )
     TgClient.bot.add_handler(
         MessageHandler(
             start, filters=command(BotCommands.StartCommand, case_sensitive=True)
@@ -254,9 +284,25 @@ def add_handlers():
     )
     TgClient.bot.add_handler(
         MessageHandler(
+            sudo_only,
+            filters=command(BotCommands.LogCommand, case_sensitive=True)
+            & CustomFilters.authorized
+            & ~CustomFilters.sudo,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
             restart_bot,
             filters=command(BotCommands.RestartCommand, case_sensitive=True)
             & CustomFilters.sudo,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            sudo_only,
+            filters=command(BotCommands.RestartCommand, case_sensitive=True)
+            & CustomFilters.authorized
+            & ~CustomFilters.sudo,
         )
     )
     TgClient.bot.add_handler(
@@ -273,6 +319,14 @@ def add_handlers():
     )
     TgClient.bot.add_handler(
         MessageHandler(
+            sudo_only,
+            filters=command(BotCommands.RestartSessionsCommand, case_sensitive=True)
+            & CustomFilters.authorized
+            & ~CustomFilters.sudo,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
             imdb_search,
             filters=command(BotCommands.IMDBCommand, case_sensitive=True)
             & CustomFilters.authorized,
@@ -280,6 +334,73 @@ def add_handlers():
     )
     TgClient.bot.add_handler(
         CallbackQueryHandler(imdb_callback, filters=regex("^imdb"))
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            poster_search,
+            filters=command(BotCommands.PosterCommand, case_sensitive=True)
+            & CustomFilters.authorized,
+        )
+    )
+    TgClient.bot.add_handler(
+        CallbackQueryHandler(poster_select, filters=regex("^psel"))
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            receive_thumbnail_upload,
+            filters=create(pending_thumbnail_upload_filter)
+            & CustomFilters.authorized_uset,
+        ),
+        group=-1,
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            file_link,
+            filters=command(BotCommands.LinkCommand, case_sensitive=True)
+            & CustomFilters.authorized,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            sites,
+            filters=command(BotCommands.SitesCommand, case_sensitive=True)
+            & CustomFilters.authorized,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            clone_channel,
+            filters=command(f"clonechannel{Config.CMD_SUFFIX}", case_sensitive=True)
+            & CustomFilters.owner,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            hstream_letter_leech,
+            filters=command(f"hsll{Config.CMD_SUFFIX}", case_sensitive=True)
+            & CustomFilters.owner,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            hstream_pause,
+            filters=command(f"hspause{Config.CMD_SUFFIX}", case_sensitive=True)
+            & CustomFilters.owner,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            hstream_resume,
+            filters=command(f"hsresume{Config.CMD_SUFFIX}", case_sensitive=True)
+            & CustomFilters.owner,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            tamilmv,
+            filters=command(f"tmv{Config.CMD_SUFFIX}", case_sensitive=True)
+            & CustomFilters.owner,
+        )
     )
     TgClient.bot.add_handler(
         MessageHandler(
@@ -327,11 +448,30 @@ def add_handlers():
             video_tools_callback, filters=regex("^vt_") & CustomFilters.authorized
         )
     )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            video_tools_media_collector,
+            filters=create(active_merge_track_filter) & CustomFilters.authorized,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            video_tools_text_collector,
+            filters=create(active_merge_text_filter) & CustomFilters.authorized,
+        )
+    )
     TgClient.bot.add_handler(CallbackQueryHandler(start_cb, filters=regex("^start")))
     TgClient.bot.add_handler(
         MessageHandler(
             torrent_search,
             filters=command(BotCommands.SearchCommand, case_sensitive=True)
+            & CustomFilters.authorized,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            create_torrent,
+            filters=command(BotCommands.CreateTorrentCommand, case_sensitive=True)
             & CustomFilters.authorized,
         )
     )
@@ -350,6 +490,12 @@ def add_handlers():
             send_user_settings,
             filters=command(BotCommands.UserSetCommand, case_sensitive=True)
             & CustomFilters.authorized_uset,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            set_custom_thumbnail,
+            filters=regex(r"^-t\s*$") & CustomFilters.authorized_uset,
         )
     )
     TgClient.bot.add_handler(
@@ -375,6 +521,9 @@ def add_handlers():
             filters=command(BotCommands.NzbSearchCommand, case_sensitive=True)
             & CustomFilters.authorized,
         )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(auto_leech, filters=CustomFilters.authorized)
     )
     if Config.SET_COMMANDS:
         global BOT_COMMANDS
@@ -415,7 +564,7 @@ def add_handlers():
                 BOT_COMMANDS, "Login", "[password] Login to Bot", 14
             )
 
-        TgClient.bot.set_bot_commands(
+        command_result = TgClient.bot.set_bot_commands(
             [
                 BotCommand(
                     cmds[0] if isinstance(cmds, list) else cmds,
@@ -426,3 +575,5 @@ def add_handlers():
                 if cmds is not None
             ]
         )
+        if isawaitable(command_result):
+            bot_loop.create_task(command_result)
