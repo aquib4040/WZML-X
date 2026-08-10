@@ -41,7 +41,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/mega-sdk
-RUN git clone --depth 1 --branch v4.30.0 https://github.com/meganz/sdk.git . \
+RUN python -m pip install --no-cache-dir "setuptools<70" wheel \
+    && git clone --depth 1 --branch v4.30.0 https://github.com/meganz/sdk.git . \
     && ./autogen.sh \
     && ./configure --disable-silent-rules --enable-python --with-python3 --disable-examples \
     && make -j"$(nproc)" \
