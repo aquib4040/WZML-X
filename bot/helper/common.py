@@ -748,53 +748,75 @@ class TaskConfig:
 
     async def proceed_extract(self, dl_path, gid):
         pswd = self.extract if isinstance(self.extract, str) else ""
-        self.files_to_proceed = []
-        if self.is_file and await is_supported_archive(dl_path):
-            self.files_to_proceed.append(dl_path)
-        else:
-            for dirpath, _, files in await sync_to_async(walk, dl_path, topdown=False):
+        recursive = bool(getattr(self, "_recursive_auto_extract", False))
+        max_rounds = 16
+        output_path = dl_path
+        extracted_files = set()
+
+        async def find_archives():
+            found = []
+            if self.is_file and output_path == dl_path:
+                return [dl_path] if await is_supported_archive(dl_path) else []
+            scan_path = output_path if self.is_file else dl_path
+            if not await aiopath.isdir(scan_path):
+                return found
+            for dirpath, _, files in await sync_to_async(
+                walk, scan_path, topdown=False
+            ):
                 for file_ in files:
                     f_path = ospath.join(dirpath, file_)
-                    if await is_supported_archive(f_path):
-                        self.files_to_proceed.append(f_path)
+                    if (
+                        f_path not in extracted_files
+                        and await is_supported_archive(f_path)
+                    ):
+                        found.append(f_path)
+            return found
 
+        self.files_to_proceed = await find_archives()
         if not self.files_to_proceed:
             return dl_path
         sevenz = SevenZ(self)
         LOGGER.info(f"Extracting: {self.name}")
         async with task_dict_lock:
             task_dict[self.mid] = SevenZStatus(self, sevenz, gid, "Extract")
-        for dirpath, _, files in await sync_to_async(
-            walk, self.up_dir or self.dir, topdown=False
-        ):
-            code = 0
-            for file_ in files:
+
+        for _ in range(max_rounds):
+            archives = await find_archives()
+            if not archives:
+                break
+            extracted_this_round = 0
+            for f_path in archives:
                 if self.is_cancelled:
                     return False
-                f_path = ospath.join(dirpath, file_)
-                if await is_supported_archive(f_path):
-                    self.proceed_count += 1
-                    if self.is_file:
-                        try:
-                            t_path = get_base_name(f_path)
-                        except Exception:
-                            t_path = f"{f_path}_extracted"
-                    else:
-                        t_path = dirpath
-                    if not self.is_file:
-                        self.subname = file_
-                    code = await sevenz.extract(f_path, t_path, pswd)
-            if self.is_cancelled:
-                return code
-            if code == 0:
-                for file_ in files:
-                    if is_archive_split(file_) or is_archive(file_):
-                        del_path = ospath.join(dirpath, file_)
-                        try:
-                            await remove(del_path)
-                        except Exception:
-                            self.is_cancelled = True
-        return t_path if self.is_file and code == 0 else dl_path
+                self.proceed_count += 1
+                if self.is_file and f_path == dl_path:
+                    try:
+                        t_path = get_base_name(f_path)
+                    except Exception:
+                        t_path = f"{f_path}_extracted"
+                    output_path = t_path
+                else:
+                    t_path = ospath.dirname(f_path)
+                    self.subname = ospath.basename(f_path)
+                code = await sevenz.extract(f_path, t_path, pswd)
+                if self.is_cancelled:
+                    return False
+                extracted_files.add(f_path)
+                if code == 0:
+                    extracted_this_round += 1
+                    try:
+                        await remove(f_path)
+                    except Exception as error:
+                        LOGGER.warning(f"Unable to remove extracted archive {f_path}: {error}")
+            if not recursive or not extracted_this_round:
+                break
+        else:
+            LOGGER.warning(
+                "Auto Unzip stopped after %s nested archive levels for %s",
+                max_rounds,
+                self.name,
+            )
+        return output_path if self.is_file and output_path != dl_path else dl_path
 
     async def proceed_ffmpeg(self, dl_path, gid):
         if not await aiopath.exists(dl_path):

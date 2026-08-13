@@ -135,6 +135,9 @@ async def _next_process_step(listener, phase, filename=""):
 async def maybe_enable_auto_unzip(listener, up_path):
     if not auto_enabled(listener) or not bool_setting(listener, "AUTO_UNZIP"):
         return
+    # Let the normal extractor know that archives revealed by this extraction
+    # must be processed too (for example, a ZIP that contains episode ZIPs).
+    listener._recursive_auto_extract = True
     if listener.extract:
         return
     if await aiopath.isfile(up_path) and await is_supported_archive(up_path):
