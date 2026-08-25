@@ -51,7 +51,7 @@ from .ext_utils.media_utils import (
     take_ss,
 )
 from .ext_utils.metadata_utils import MetadataProcessor
-from .ext_utils.performance import get_ffmpeg_cores, get_ffmpeg_threads
+from .ext_utils.performance import get_ffmpeg_threads
 from .mirror_leech_utils.gdrive_utils.list import GoogleDriveList
 from .mirror_leech_utils.rclone_utils.list import RcloneList
 from .mirror_leech_utils.status_utils.ffmpeg_status import FFmpegStatus
@@ -285,22 +285,43 @@ class TaskConfig:
         if self.ffmpeg_cmds and not isinstance(self.ffmpeg_cmds, list):
             if self.user_dict.get("FFMPEG_CMDS", None):
                 ffmpeg_dict = self.user_dict["FFMPEG_CMDS"]
-                self.ffmpeg_cmds = [
-                    value
-                    for key in list(self.ffmpeg_cmds)
-                    if key in ffmpeg_dict
-                    for value in ffmpeg_dict[key]
-                ]
             elif "FFMPEG_CMDS" not in self.user_dict and Config.FFMPEG_CMDS:
                 ffmpeg_dict = Config.FFMPEG_CMDS
-                self.ffmpeg_cmds = [
-                    value
-                    for key in list(self.ffmpeg_cmds)
-                    if key in ffmpeg_dict
-                    for value in ffmpeg_dict[key]
-                ]
             else:
-                self.ffmpeg_cmds = None
+                ffmpeg_dict = {}
+
+            # /bsetting commonly stores a one-command preset as a string,
+            # while config.py examples use a list.  Treat both forms alike;
+            # iterating a string used to turn a command into individual
+            # characters and made -ff appear to do nothing.
+            selected = (
+                list(self.ffmpeg_cmds)
+                if isinstance(self.ffmpeg_cmds, (set, tuple))
+                else [str(self.ffmpeg_cmds)]
+            )
+            commands = []
+            missing = []
+            if isinstance(ffmpeg_dict, dict):
+                for key in selected:
+                    preset = ffmpeg_dict.get(key)
+                    if preset is None:
+                        missing.append(key)
+                    elif isinstance(preset, str):
+                        if preset.strip():
+                            commands.append(preset.strip())
+                    elif isinstance(preset, (list, tuple, set)):
+                        commands.extend(
+                            value.strip()
+                            for value in preset
+                            if isinstance(value, str) and value.strip()
+                        )
+            if missing:
+                LOGGER.warning(
+                    "FFmpeg preset(s) not found: %s. Available: %s",
+                    ", ".join(missing),
+                    ", ".join(map(str, ffmpeg_dict)) if isinstance(ffmpeg_dict, dict) else "none",
+                )
+            self.ffmpeg_cmds = commands or None
 
         self.metadata_title = self.user_dict.get("METADATA")
 
@@ -844,10 +865,17 @@ class TaskConfig:
                         and ffmpeg_cmd[thread_index + 1].lower() in {"0", "auto"}
                     ):
                         ffmpeg_cmd[thread_index + 1] = str(get_ffmpeg_threads())
+                if "-i" not in ffmpeg_cmd:
+                    LOGGER.warning(
+                        "Skipping invalid FFmpeg preset without -i: %s",
+                        " ".join(ffmpeg_cmd),
+                    )
+                    continue
+                # Do not force taskset here. Docker may expose a restricted
+                # CPU set whose host CPU numbers differ from 0..N, causing
+                # taskset to fail before FFmpeg starts. Thread limits still
+                # use the safe configured profile above.
                 cmd = [
-                    "taskset",
-                    "-c",
-                    get_ffmpeg_cores(),
                     BinConfig.FFMPEG_NAME,
                     "-hide_banner",
                     "-loglevel",
@@ -862,6 +890,12 @@ class TaskConfig:
                 else:
                     delete_files = False
                 index = cmd.index("-i")
+                if index + 1 >= len(cmd):
+                    LOGGER.warning(
+                        "Skipping invalid FFmpeg preset with no input value: %s",
+                        " ".join(ffmpeg_cmd),
+                    )
+                    continue
                 input_file = cmd[index + 1]
                 if input_file.strip().endswith(".video"):
                     ext = "video"

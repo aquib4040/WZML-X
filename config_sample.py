@@ -63,7 +63,7 @@ USE_SERVICE_ACCOUNTS = False
 NAME_SWAP = ""
 FFMPEG_CMDS = {
     "t": [
-        "-threads 0 -i mltb.video -map 0:v:0 -map 0:a:m:language:tam -map 0:s:m:language:eng -c copy -max_muxing_queue_size 9999 mltb.mkv -del"
+        "-threads 0 -i mltb.video -map 0:v:0? -map 0:a? -map 0:s? -c copy -max_muxing_queue_size 9999 mltb.mkv -del"
     ]
 }
 UPLOAD_PATHS = {}
