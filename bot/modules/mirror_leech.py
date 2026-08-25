@@ -251,6 +251,12 @@ class Mirror(TaskListener):
                 self.folder_name = f"/vt_video_merge_{self.message.id}"
         if self.zip_merge and self.multi > 1 and not self.folder_name:
             self.folder_name = f"/zip_merge_{self.message.id}"
+        # For -i combined with -m, advance the next item only once this item
+        # has fully downloaded and been placed in the shared merge workspace.
+        # Normal -i tasks retain their download-and-upload sequencing.
+        self._multi_merge_download_chain = bool(
+            self.folder_name and self.multi > 1
+        )
 
         try:
             if args["-ff"]:

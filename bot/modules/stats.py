@@ -244,7 +244,7 @@ async def get_stats(event, key="home"):
 ┠ <b>YT-DLP Limit :</b> {Config.YTDLP_LIMIT or "∞"} GB
 ┠ <b>Playlist Limit :</b> {Config.PLAYLIST_LIMIT or "∞"}
 ┠ <b>Mega Limit :</b> {Config.MEGA_LIMIT or "∞"} GB
-┠ <b>Leech Limit :</b> {Config.LEECH_LIMIT or "∞"} GB
+┠ <b>Leech Limit :</b> {"∞" if Config.ALLOW_LARGE_LEECH else (Config.LEECH_LIMIT or "∞")} GB
 ┠ <b>Archive Limit :</b> {Config.ARCHIVE_LIMIT or "∞"} GB
 ┠ <b>Extract Limit :</b> {Config.EXTRACT_LIMIT or "∞"} GB
 ┞ <b>Threshold Storage :</b> {Config.STORAGE_LIMIT or "∞"} GB

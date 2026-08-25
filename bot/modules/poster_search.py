@@ -1,6 +1,5 @@
 from asyncio import Event, TimeoutError, sleep, wait_for
 from html import escape
-from re import search
 from time import time
 
 from aiofiles.os import remove
@@ -268,15 +267,9 @@ async def open_task_thumbnail_picker(listener, media_path):
         or Config.LEECH_FILENAME_REMNAME_REGEX
     )
     title, season, year = format_clean_poster_title(raw_query, rename_regex)
-    episode_match = search(
-        r"(?i)(?:S\d{1,2}\s*)?(?:E|EP(?:ISODE)?)\s*0*(\d{1,4})",
-        raw_query,
-    )
     query_parts = [title]
     if season:
         query_parts.append(season)
-    if episode_match:
-        query_parts.append(f"Episode {int(episode_match.group(1))}")
     if year:
         query_parts.append(str(year))
     query_text = " ".join(part for part in query_parts if part).strip() or raw_query

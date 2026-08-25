@@ -225,6 +225,9 @@ NZB_LIMIT = 0
 YTDLP_LIMIT = 0
 PLAYLIST_LIMIT = 0
 LEECH_LIMIT = 0
+# Permit large leeches and split them to Telegram-safe upload parts. Set False
+# only if LEECH_LIMIT should remain a hard cap.
+ALLOW_LARGE_LEECH = True
 EXTRACT_LIMIT = 0
 ARCHIVE_LIMIT = 0
 STORAGE_LIMIT = 0

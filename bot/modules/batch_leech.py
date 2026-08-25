@@ -51,6 +51,13 @@ def _extract_links(message):
     return [item.strip() for item in raw.replace("\n", " ").split() if _valid_link(item.strip())]
 
 
+def _merge_requested(message):
+    """Whether this /bleech request should download every source before merging."""
+    text = message.text or message.caption or ""
+    parts = text.split(maxsplit=1)
+    return len(parts) > 1 and "-m" in parts[1].split()
+
+
 async def _http_size(link):
     if not link.startswith(("http://", "https://")):
         return 0
@@ -91,9 +98,61 @@ async def batch_leech(client, message):
         )
         return
 
+    merge_all = _merge_requested(message)
+    if merge_all and len(links) < 2:
+        await send_message(message, "Batch Merge needs at least two valid links.")
+        return
+
     links, skipped = await _filter_by_limit(links)
     if not links:
         await send_message(message, "Batch Leech: all links exceeded the per-link limit.")
+        return
+    if merge_all and len(links) < 2:
+        await send_message(message, "Batch Merge needs two links after applying the per-link limit.")
+        return
+
+    if merge_all:
+        if Config.DISABLE_MULTI:
+            await send_message(
+                message,
+                "Batch Merge is unavailable because multi-task mode is disabled.",
+            )
+            return
+
+        # Reuse the normal -i/-m pipeline.  It keeps all finished downloads in
+        # one shared directory and invokes the merge only after the final link
+        # has finished downloading, instead of trying to merge partial files.
+        from .mirror_leech import Mirror
+
+        folder_name = f"bleech_merge_{message.id}"
+        task_msg = await send_message(
+            message,
+            (
+                "<b>Batch Merge Planner</b>\n"
+                f"Links: <code>{len(links)}</code>\n"
+                "Each link will finish downloading before the final merge starts."
+            ),
+        )
+        task_msg = await client.get_messages(
+            chat_id=task_msg.chat.id, message_ids=task_msg.id
+        )
+        task_msg.text = (
+            f"/{BotCommands.LeechCommand[0]} {links[0]} "
+            f"-i {len(links)} -m {folder_name}"
+        )
+        if message.from_user:
+            task_msg.from_user = message.from_user
+        else:
+            task_msg.sender_chat = message.sender_chat
+
+        worker = Mirror(
+            client,
+            task_msg,
+            is_leech=True,
+            bulk=list(links),
+            options=f"-m {folder_name}",
+        )
+        await worker.new_event()
         return
 
     controller = BatchTaskController("bleech", message)

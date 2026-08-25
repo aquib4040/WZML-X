@@ -2838,7 +2838,9 @@ def format_clean_poster_title(raw_title, rename_regex=None):
     return _final_clean(title), None, None
 
 
-async def get_tmdb_poster_link(title, year=None, as_doc=False, season=None, episode=None):
+async def get_tmdb_poster_link(
+    title, year=None, as_doc=False, season=None, episode=None, season_only=False
+):
     """Fetch a poster/backdrop URL from TMDb with one live HTTP client."""
     access_token = Config.TMDB_ACCESS_TOKEN
     if not access_token:
@@ -2922,35 +2924,42 @@ async def get_tmdb_poster_link(title, year=None, as_doc=False, season=None, epis
                                 )
                                 if season_resp.status_code == 200:
                                     season_data = season_resp.json()
-                                    if as_doc and season_data.get("poster_path"):
+                                    if (as_doc or season_only) and season_data.get("poster_path"):
                                         return (
                                             "https://image.tmdb.org/t/p/original"
                                             f"{season_data['poster_path']}"
                                         )
-                                    episodes = season_data.get("episodes", [])
-                                    episode_match = re.search(r"\d+", str(episode or ""))
-                                    episode_no = int(episode_match.group()) if episode_match else None
-                                    preferred = next(
-                                        (
-                                            value
-                                            for value in episodes
-                                            if episode_no is not None
-                                            and value.get("episode_number") == episode_no
-                                            and value.get("still_path")
-                                        ),
-                                        None,
-                                    )
-                                    if preferred is None:
-                                        preferred = max(
-                                            (value for value in episodes if value.get("still_path")),
-                                            key=lambda value: float(value.get("vote_average") or 0),
-                                            default=None,
+                                    if season_only:
+                                        LOGGER.info(
+                                            "TMDb season poster unavailable for Season %s; "
+                                            "falling back to series artwork",
+                                            season_no,
                                         )
-                                    if preferred:
-                                        return (
-                                            "https://image.tmdb.org/t/p/original"
-                                            f"{preferred['still_path']}"
+                                    else:
+                                        episodes = season_data.get("episodes", [])
+                                        episode_match = re.search(r"\d+", str(episode or ""))
+                                        episode_no = int(episode_match.group()) if episode_match else None
+                                        preferred = next(
+                                            (
+                                                value
+                                                for value in episodes
+                                                if episode_no is not None
+                                                and value.get("episode_number") == episode_no
+                                                and value.get("still_path")
+                                            ),
+                                            None,
                                         )
+                                        if preferred is None:
+                                            preferred = max(
+                                                (value for value in episodes if value.get("still_path")),
+                                                key=lambda value: float(value.get("vote_average") or 0),
+                                                default=None,
+                                            )
+                                        if preferred:
+                                            return (
+                                                "https://image.tmdb.org/t/p/original"
+                                                f"{preferred['still_path']}"
+                                            )
                                 LOGGER.info(
                                     "TMDb season artwork unavailable for Season %s; "
                                     "falling back to series artwork",
@@ -3129,16 +3138,17 @@ async def get_final_poster_url(raw_filename, as_doc=False, rename_regex=None):
 
 
 async def get_landscape_provider_thumbnail_url(raw_filename, rename_regex=None):
+    """Return series/season artwork for an automatic video thumbnail.
+
+    A thumbnail represents the release, not one episode.  In particular, do
+    not use TMDb episode stills here: those made consecutive episodes receive
+    unrelated artwork even when they belong to the same season.
+    """
     title, season, year = format_clean_poster_title(raw_filename, rename_regex)
-    episode_match = re.search(
-        r"(?i)(?:S\d{1,2}\s*)?(?:E|EP(?:ISODE)?)\s*0*(\d{1,4})",
-        str(raw_filename or ""),
-    )
-    episode = episode_match.group(1) if episode_match else None
     if not title or len(title.strip()) < 2 or is_hash_like_title(title):
         return None
     tmdb_url = await get_tmdb_poster_link(
-        title, year, as_doc=False, season=season, episode=episode
+        title, year, as_doc=False, season=season, season_only=True
     )
     if tmdb_url:
         return tmdb_url
@@ -3147,26 +3157,18 @@ async def get_landscape_provider_thumbnail_url(raw_filename, rename_regex=None):
 
 async def get_anime_landscape_thumbnail(video_file, raw_filename, duration=None, rename_regex=None, force=False):
     title, season, year = format_clean_poster_title(raw_filename, rename_regex)
-    episode_match = re.search(
-        r"(?i)(?:S\d{1,2}\s*)?(?:E|EP(?:ISODE)?)\s*0*(\d{1,4})",
-        str(raw_filename or ""),
-    )
-    episode = episode_match.group(1) if episode_match else None
     if not force and not _looks_like_anime_name(raw_filename, title):
         return None
 
-    if season:
-        poster_url = (
-            await get_tmdb_poster_link(title, year, False, season, episode)
-            or await get_anilist_poster_link(title, as_doc=False)
+    # AniList is the primary provider for anime. Its banner is series artwork,
+    # so episode numbers never affect the thumbnail. TMDb then contributes a
+    # matching season artwork or the main-series backdrop as a fallback.
+    poster_url = (
+        await get_anilist_poster_link(title, as_doc=False)
+        or await get_tmdb_poster_link(
+            title, year, False, season=season, season_only=True
         )
-    else:
-        # Preserve the original anime lookup order unless season-specific TMDb
-        # artwork was explicitly requested.
-        poster_url = (
-            await get_anilist_poster_link(title, as_doc=False)
-            or await get_tmdb_poster_link(title, year, False)
-        )
+    )
     if poster_url:
         thumb = await download_image_thumb(poster_url, landscape=True)
         if thumb:

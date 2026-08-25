@@ -968,6 +968,13 @@ class TelegramUploader:
                     thumb = await get_audio_thumbnail(self._up_path)
                     if thumb:
                         LOGGER.info(f"Using embedded audio thumbnail for: {file}")
+                elif is_video:
+                    # Provider artwork is optional.  A local frame keeps
+                    # automatic thumbnails reliable for unknown releases,
+                    # season lookup misses, and transient provider failures.
+                    thumb = await get_video_thumbnail(self._up_path, None)
+                    if thumb:
+                        LOGGER.info(f"Using FFmpeg video-frame fallback for: {file}")
 
             private_text = " ".join(
                 filter(

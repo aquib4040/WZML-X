@@ -328,6 +328,7 @@ Useful variables:
 starfallx_batch = """<b>StarFallX Batch Leech</b>
 
 <code>/bleech link1 link2 link3</code> runs many links with BLEECH download/upload limits.
+Add <code>-m</code> to download every supplied link fully, then merge and upload them as one task.
 
 <code>/bqleech magnet</code> is qB-only huge torrent batching using <code>BQLEECH_BATCH_SIZE_GB</code>.
 
@@ -672,7 +673,7 @@ def get_help_string():
             "<b>StarFallX v1.2 quick guide</b>",
             f"/{BotCommands.LeechCommand[0]} link -vt: open Video Tools after download. Extract Stream is exclusive.",
             f"/{BotCommands.LeechCommand[0]} link -ar custom TEMPLATE: one-task AutoRename template.",
-            f"/{BotCommands.BatchLeechCommand[0]} link1 link2 link3: batch leech with download/upload limits.",
+            f"/{BotCommands.BatchLeechCommand[0]} link1 link2 link3: batch leech with download/upload limits; add -m to merge all links after download.",
             f"/{BotCommands.BigQLeechCommand[0]} magnet: qB huge torrent batching; /bql and /bqbleech also work.",
             f"/{BotCommands.CreateTorrentCommand[0]} link: create thumbnail, contact sheet, BBCode description, and torrent.",
             "Auto Process flow: download -> unzip -> order -> remove streams -> merge -> intro -> metadata -> rename -> sequential upload.",

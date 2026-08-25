@@ -324,7 +324,14 @@ async def limit_checker(listener, yt_playlist=0):
 
     if not limit_exceeded:
         extra_limits = [
-            (listener.is_leech, "LEECH_LIMIT", "Leech"),
+            # Telegram uploads are split into safe parts, so an old global
+            # leech cap (commonly 4 GB) must not reject otherwise uploadable
+            # large files.  Operators can restore that policy explicitly.
+            (
+                listener.is_leech and not Config.ALLOW_LARGE_LEECH,
+                "LEECH_LIMIT",
+                "Leech",
+            ),
             (listener.compress, "ARCHIVE_LIMIT", "Archive"),
             (listener.extract, "EXTRACT_LIMIT", "Extract"),
         ]

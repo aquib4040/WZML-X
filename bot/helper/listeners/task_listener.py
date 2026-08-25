@@ -195,6 +195,11 @@ class TaskListener(TaskConfig):
         await sleep(2)
         if self.is_cancelled:
             return
+        if getattr(self, "_multi_merge_download_chain", False):
+            # Let run_multi start the next source after this download is
+            # complete. The shared-directory lock below then moves every
+            # finished input into the final merge task instead of uploading it.
+            self.mark_multi_step_done()
         multi_links = False
         if (
             self.folder_name
