@@ -91,6 +91,26 @@ Deploy with Docker and provide the required configuration values. The container 
 
 ## Deployment
 
+### Fresh VPS: one-command deployment
+
+On a new **Ubuntu/Debian VPS**, log in as `root` and paste this single command.
+It installs Docker and Docker Compose, asks for the required Telegram/MongoDB
+values, clones the `starfallx-v1.2-video-tools` branch into `/opt/WZML-X`, and
+starts the bot.
+
+```bash
+bash -c 'set -euo pipefail; apt-get update; apt-get install -y git ca-certificates python3 docker.io docker-compose-v2; systemctl enable --now docker; read -rp "BOT_TOKEN: " BOT_TOKEN; read -rp "TELEGRAM_API: " TELEGRAM_API; read -rp "TELEGRAM_HASH: " TELEGRAM_HASH; read -rp "OWNER_ID: " OWNER_ID; read -rp "DATABASE_URL: " DATABASE_URL; export BOT_TOKEN TELEGRAM_API TELEGRAM_HASH OWNER_ID DATABASE_URL; git clone --branch starfallx-v1.2-video-tools --single-branch https://github.com/mari8438/WZML-X.git /opt/WZML-X; cd /opt/WZML-X; cp config_sample.py config.py; python3 -c "from pathlib import Path; import os, re; p=Path(\"config.py\"); s=p.read_text(); [globals().__setitem__(\"s\", re.sub(r\"(?m)^%s\s*=.*$\" % k, \"%s = %r\" % (k, os.environ[k] if k not in (\"TELEGRAM_API\", \"OWNER_ID\") else int(os.environ[k])), s)) for k in (\"BOT_TOKEN\", \"TELEGRAM_API\", \"TELEGRAM_HASH\", \"OWNER_ID\", \"DATABASE_URL\")]; p.write_text(s)"; docker compose up -d --build; docker compose ps'
+```
+
+After it completes, use these commands from `/opt/WZML-X`:
+
+```bash
+docker compose logs -f app       # live bot logs
+docker compose logs -f tunnel    # find the Cloudflare web URL
+docker compose restart           # restart after a config change
+docker compose pull && docker compose up -d --build  # update and rebuild
+```
+
 <details open>
    <summary>VPS / Dedicated Server (Recommended)</summary>
 
