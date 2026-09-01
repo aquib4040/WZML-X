@@ -2,6 +2,7 @@ from asyncio import Event, wait_for
 from ast import literal_eval
 from functools import partial
 from time import time
+from urllib.parse import urlparse
 
 from httpx import AsyncClient
 from aiofiles.os import path as aiopath
@@ -39,6 +40,33 @@ SITE_OPTION_KEYS = {
     "mx_audio",
     "mx_quality",
 }
+
+
+def _is_youtube_link(link):
+    """Return True only for normal YouTube watch/short links."""
+    if not isinstance(link, str):
+        return False
+    host = (urlparse(link).hostname or "").lower().removeprefix("www.")
+    return host in {"youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
+
+
+def _is_youtube_reload_error(error):
+    return "page needs to be reloaded" in str(error).lower()
+
+
+def _youtube_reload_options(options):
+    """Create a fresh YouTube client configuration for one safe retry.
+
+    Logged-in cookies can make yt-dlp select `tv_downgraded`, which currently
+    produces YouTube's transient "page needs to be reloaded" response.  The
+    fallback is intentionally applied only after that exact error, leaving a
+    user's normal extractor options untouched for successful downloads.
+    """
+    retry_options = options.copy()
+    extractor_args = dict(retry_options.get("extractor_args") or {})
+    extractor_args["youtube"] = ["player_client=default,web_embedded"]
+    retry_options["extractor_args"] = extractor_args
+    return retry_options
 
 
 @new_task
@@ -443,11 +471,21 @@ class SiteSelection:
 
 
 def extract_info(link, options):
-    with YoutubeDL(options) as ydl:
-        result = ydl.extract_info(link, download=False)
-        if result is None:
-            raise ValueError("Info result is None")
-        return result
+    try:
+        with YoutubeDL(options) as ydl:
+            result = ydl.extract_info(link, download=False)
+    except Exception as e:
+        if not (_is_youtube_link(link) and _is_youtube_reload_error(e)):
+            raise
+        LOGGER.warning(
+            "YouTube asked to reload the page; retrying extraction with the "
+            "web_embedded player client"
+        )
+        with YoutubeDL(_youtube_reload_options(options)) as ydl:
+            result = ydl.extract_info(link, download=False)
+    if result is None:
+        raise ValueError("Info result is None")
+    return result
 
 
 async def _mdisk(link, name):

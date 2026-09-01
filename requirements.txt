@@ -42,4 +42,6 @@ uvicorn
 uvloop
 webvtt-py
 xattr
-yt-dlp[default,curl-cffi]==2026.7.4
+# Deliberately unpinned: update.py runs `uv pip install -U -r requirements.txt`
+# on every container start, so YouTube extractor fixes arrive automatically.
+yt-dlp[default,curl-cffi]

@@ -1,8 +1,8 @@
 from logging import getLogger
 from os import path as ospath, listdir
 from re import search as re_search
-from contextlib import suppress
 from secrets import token_hex
+from urllib.parse import urlparse
 from yt_dlp import YoutubeDL, DownloadError
 
 from .... import task_dict_lock, task_dict, user_data
@@ -18,6 +18,25 @@ from ...telegram_helper.message_utils import send_status_message
 from ..status_utils.yt_dlp_status import YtDlpStatus
 
 LOGGER = getLogger(__name__)
+
+
+def _is_youtube_link(link):
+    if not isinstance(link, str):
+        return False
+    host = (urlparse(link).hostname or "").lower().removeprefix("www.")
+    return host in {"youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
+
+
+def _is_youtube_reload_error(error):
+    return "page needs to be reloaded" in str(error).lower()
+
+
+def _youtube_reload_options(options):
+    retry_options = options.copy()
+    extractor_args = dict(retry_options.get("extractor_args") or {})
+    extractor_args["youtube"] = ["player_client=default,web_embedded"]
+    retry_options["extractor_args"] = extractor_args
+    return retry_options
 
 
 class MyLogger:
@@ -159,13 +178,27 @@ class YoutubeDLHelper:
             ("rtmp", "mms", "rstp", "rtmps")
         ):
             self.opts["external_downloader"] = BinConfig.FFMPEG_NAME
-        with YoutubeDL(self.opts) as ydl:
-            try:
+        try:
+            with YoutubeDL(self.opts) as ydl:
                 result = ydl.extract_info(link_for_meta, download=False)
-                if result is None:
-                    raise ValueError("Info result is None")
-            except Exception as e:
+        except Exception as e:
+            if not (
+                _is_youtube_link(link_for_meta) and _is_youtube_reload_error(e)
+            ):
                 return self._on_download_error(str(e))
+            LOGGER.warning(
+                "YouTube asked to reload the page; retrying metadata with "
+                "the web_embedded player client"
+            )
+            self.opts = _youtube_reload_options(self.opts)
+            try:
+                with YoutubeDL(self.opts) as ydl:
+                    result = ydl.extract_info(link_for_meta, download=False)
+            except Exception as retry_error:
+                return self._on_download_error(str(retry_error))
+        if result is None:
+            return self._on_download_error("Info result is None")
+        with YoutubeDL(self.opts) as ydl:
             if isinstance(self._listener.link, list):
                 self.is_playlist = True
                 self.playlist_count = len(self._listener.link)
@@ -197,29 +230,48 @@ class YoutubeDLHelper:
                     self._ext = ext
 
     def _download(self, path):
-        with suppress(Exception):
+        links = (
+            self._listener.link
+            if isinstance(self._listener.link, list)
+            else [self._listener.link]
+        )
+        try:
             with YoutubeDL(self.opts) as ydl:
-                try:
-                    links = (
-                        self._listener.link
-                        if isinstance(self._listener.link, list)
-                        else [self._listener.link]
-                    )
-                    ydl.download(links)
-                except DownloadError as e:
-                    if not self._listener.is_cancelled:
-                        self._on_download_error(str(e))
-                    return
-            if self.is_playlist and (
-                not ospath.exists(path) or len(listdir(path)) == 0
+                ydl.download(links)
+        except DownloadError as e:
+            if not (
+                any(_is_youtube_link(link) for link in links)
+                and _is_youtube_reload_error(e)
             ):
-                self._on_download_error(
-                    "No video available to download from this playlist. Check logs for more details"
-                )
+                if not self._listener.is_cancelled:
+                    self._on_download_error(str(e))
                 return
-            if self._listener.is_cancelled:
+            LOGGER.warning(
+                "YouTube asked to reload the page; retrying download with "
+                "the web_embedded player client"
+            )
+            self.opts = _youtube_reload_options(self.opts)
+            try:
+                with YoutubeDL(self.opts) as ydl:
+                    ydl.download(links)
+            except Exception as retry_error:
+                if not self._listener.is_cancelled:
+                    self._on_download_error(str(retry_error))
                 return
-            async_to_sync(self._listener.on_download_complete)
+        except Exception as e:
+            if not self._listener.is_cancelled:
+                self._on_download_error(str(e))
+            return
+        if self.is_playlist and (
+            not ospath.exists(path) or len(listdir(path)) == 0
+        ):
+            self._on_download_error(
+                "No video available to download from this playlist. Check logs for more details"
+            )
+            return
+        if self._listener.is_cancelled:
+            return
+        async_to_sync(self._listener.on_download_complete)
         return
 
     async def add_download(self, path, qual, playlist, options):
