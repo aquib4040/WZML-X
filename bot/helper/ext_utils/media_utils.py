@@ -3138,36 +3138,32 @@ async def get_final_poster_url(raw_filename, as_doc=False, rename_regex=None):
 
 
 async def get_landscape_provider_thumbnail_url(raw_filename, rename_regex=None):
-    """Return series/season artwork for an automatic video thumbnail.
+    """Return the legacy provider artwork flow for automatic thumbnails.
 
-    A thumbnail represents the release, not one episode.  In particular, do
-    not use TMDb episode stills here: those made consecutive episodes receive
-    unrelated artwork even when they belong to the same season.
+    Manual artwork and poster search can use season-aware matching. Automatic
+    thumbnails deliberately retain the long-standing series lookup: it has a
+    much better success rate for release names which do not map exactly to a
+    TMDb season record.
     """
-    title, season, year = format_clean_poster_title(raw_filename, rename_regex)
+    title, _, year = format_clean_poster_title(raw_filename, rename_regex)
     if not title or len(title.strip()) < 2 or is_hash_like_title(title):
         return None
-    tmdb_url = await get_tmdb_poster_link(
-        title, year, as_doc=False, season=season, season_only=True
-    )
+    tmdb_url = await get_tmdb_poster_link(title, year, as_doc=False)
     if tmdb_url:
         return tmdb_url
     return await get_anilist_poster_link(title, as_doc=False)
 
 
 async def get_anime_landscape_thumbnail(video_file, raw_filename, duration=None, rename_regex=None, force=False):
-    title, season, year = format_clean_poster_title(raw_filename, rename_regex)
+    title, _, _ = format_clean_poster_title(raw_filename, rename_regex)
     if not force and not _looks_like_anime_name(raw_filename, title):
         return None
 
-    # AniList is the primary provider for anime. Its banner is series artwork,
-    # so episode numbers never affect the thumbnail. TMDb then contributes a
-    # matching season artwork or the main-series backdrop as a fallback.
+    # Preserve the proven automatic anime lookup: AniList banner first, then
+    # normal TMDb artwork. This intentionally avoids season/episode matching.
     poster_url = (
         await get_anilist_poster_link(title, as_doc=False)
-        or await get_tmdb_poster_link(
-            title, year, False, season=season, season_only=True
-        )
+        or await get_tmdb_poster_link(title, as_doc=False)
     )
     if poster_url:
         thumb = await download_image_thumb(poster_url, landscape=True)
