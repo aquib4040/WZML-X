@@ -16,6 +16,7 @@ from .pyq import search_pyqs
 from .importance import top_topics
 from .student import complete_minutes, quiz_items, revision_items
 from .youtube import enqueue_summary
+from .adaptive import OFFICIAL_GROUP4_SYLLABUS, adapt_plan, create_mock
 from .jobs.repository import jobs
 
 
@@ -173,6 +174,47 @@ async def scout(_, message):
     await send_message(message, f"🔎 Official TNPSC source scan queued.\nJob: <code>{job_id or 'database unavailable'}</code>")
 
 
+async def adapt(_, message):
+    tasks = await adapt_plan(message.from_user.id)
+    body = "\n".join(f"• {task['title']} ({task['minutes']} min)" for task in tasks)
+    await send_message(message, f"🧭 <b>Adaptive Plan Updated</b>\n\n{body}")
+
+
+async def mock(_, message):
+    result = await create_mock(message.from_user.id)
+    if not result:
+        await send_message(message, "No PYQs are available for a mock test yet.")
+        return
+    mock_id, count = result
+    await send_message(message, f"📝 <b>Mock Test Started</b>\n\nQuestions available: <b>{count}</b>\nOfficial pattern: Tamil 100 + General Studies 75 + Aptitude 25\nMock ID: <code>{mock_id}</code>\n\nA full 200-question test will become available as more PYQs are imported.")
+
+
+async def syllabus(_, message):
+    body = "\n".join(f"• {name}: {count} questions" for name, count in OFFICIAL_GROUP4_SYLLABUS.items())
+    await send_message(message, f"📚 <b>Official Group IV Pattern</b>\n\n{body}\nTotal: 200 questions / 300 marks / 3 hours")
+
+
+async def sources(_, message):
+    if database.db is None:
+        await send_message(message, "Source database is unavailable.")
+        return
+    rows = [row async for row in database.db.tnpsc_sources.find({"processing_status": "discovered"}).limit(10)]
+    if not rows:
+        await send_message(message, "No discovered sources are waiting for approval.")
+        return
+    body = "\n".join(f"<code>{row['_id']}</code> — {row.get('title', row.get('source_type', 'source'))}" for row in rows)
+    await send_message(message, f"🔎 <b>Sources Awaiting Approval</b>\n\n{body}\n\nUse <code>/approve SOURCE_ID</code> after review.")
+
+
+async def approve(_, message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or database.db is None:
+        await send_message(message, "Usage: <code>/approve SOURCE_ID</code>")
+        return
+    result = await database.db.tnpsc_sources.update_one({"_id": parts[1].strip(), "processing_status": "discovered"}, {"$set": {"processing_status": "approved"}})
+    await send_message(message, "✅ Source approved." if result.modified_count else "Source not found or already reviewed.")
+
+
 async def word(_, message):
     await send_message(
         message,
@@ -209,4 +251,9 @@ def register_handlers(client):
     client.add_handler(MessageHandler(quiz, command("quiz") & owner))
     client.add_handler(MessageHandler(ytsummary, command("ytsummary") & owner))
     client.add_handler(MessageHandler(scout, command("scout") & owner))
+    client.add_handler(MessageHandler(adapt, command("adapt") & owner))
+    client.add_handler(MessageHandler(mock, command("mock") & owner))
+    client.add_handler(MessageHandler(syllabus, command("syllabus") & owner))
+    client.add_handler(MessageHandler(sources, command("sources") & owner))
+    client.add_handler(MessageHandler(approve, command("approve") & owner))
     LOGGER.info("TNPSC private study coach handlers registered")
