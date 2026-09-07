@@ -25,6 +25,11 @@ class Config:
     TNPSC_AI_PROVIDER = "openrouter"
     TNPSC_AI_MODEL = "openrouter/free"
     OPENROUTER_API_KEY = ""
+    OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+    GEMINI_MODEL = "gemini-2.0-flash"
+    OLLAMA_BASE_URL = "http://ollama:11434/v1"
+    OLLAMA_MODEL = "llama3.2:3b"
+    TNPSC_AI_TIMEOUT_SECONDS = 60
     GEMINI_API_KEY = ""
     TNPSC_AI_FALLBACK_PROVIDER = "gemini"
     TNPSC_AI_CONCURRENCY = 3

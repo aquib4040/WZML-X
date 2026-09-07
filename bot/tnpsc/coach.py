@@ -9,6 +9,9 @@ from ..helper.ext_utils.db_handler import database
 from ..helper.telegram_helper.message_utils import send_message
 from .jobs.repository import jobs
 from .syllabus import build_daily_plan, get_progress
+from .ai import get_provider
+from .ai.base import AIRequest
+from .retrieval import format_context, retrieve
 
 
 def _owner_id():
@@ -76,6 +79,30 @@ async def enqueue_daily_plan(_, message):
     await send_message(message, f"✅ Daily timetable job queued.\nJob: <code>{job_id or 'database unavailable'}</code>")
 
 
+async def ask(_, message):
+    question = (message.text or "").split(maxsplit=1)
+    if len(question) < 2:
+        await send_message(message, "Usage: <code>/ask உங்கள் TNPSC கேள்வி</code>")
+        return
+    items = await retrieve(question[1])
+    if not items:
+        await send_message(message, "📚 இந்த கேள்விக்கான சேமிக்கப்பட்ட பாடநூல் ஆதாரம் கிடைக்கவில்லை. தயவுசெய்து முதலில் அந்தப் பொருளை source channel-ல் சேர்க்கவும்.")
+        return
+    context = format_context(items)
+    request = AIRequest(
+        system="You are a careful Tamil TNPSC Group 4 tutor. Answer only from the supplied source context. If the context is insufficient, say so. Never invent textbook facts. Reply mainly in Tamil and include the source numbers.",
+        prompt=f"Question: {question[1]}\n\nSource context:\n{context}",
+        max_tokens=600,
+    )
+    try:
+        answer = await get_provider().generate(request)
+    except Exception as error:
+        LOGGER.warning("TNPSC tutor provider failed: %s", type(error).__name__)
+        await send_message(message, "⚠️ AI tutor is temporarily unavailable. Please try again later.")
+        return
+    await send_message(message, f"🧠 <b>TNPSC Tutor</b>\n\n{answer}\n\n<i>Answer generated from stored textbook sources.</i>")
+
+
 async def word(_, message):
     await send_message(
         message,
@@ -104,4 +131,5 @@ def register_handlers(client):
     client.add_handler(MessageHandler(motivation, command("motivation") & owner))
     client.add_handler(MessageHandler(progress, command("progress") & owner))
     client.add_handler(MessageHandler(enqueue_daily_plan, command("refreshplan") & owner))
+    client.add_handler(MessageHandler(ask, command("ask") & owner))
     LOGGER.info("TNPSC private study coach handlers registered")
