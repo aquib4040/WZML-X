@@ -14,6 +14,7 @@ from .ai.base import AIRequest
 from .retrieval import format_context, retrieve
 from .pyq import search_pyqs
 from .importance import top_topics
+from .student import complete_minutes, quiz_items, revision_items
 
 
 def _owner_id():
@@ -124,6 +125,34 @@ async def important(_, message):
     await send_message(message, f"🎯 <b>Important PYQ Topics</b>\n\n{body}\n\n<i>Based only on stored PYQ data.</i>")
 
 
+async def complete(_, message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].isdigit():
+        await send_message(message, "Usage: <code>/complete 60</code>")
+        return
+    total = await complete_minutes(message.from_user.id, int(parts[1]))
+    await send_message(message, f"✅ Study session recorded. Total completed: <b>{total} minutes</b>")
+
+
+async def revision(_, message):
+    topics = await revision_items()
+    if not topics:
+        await send_message(message, "🔄 Revision items will appear after PYQ data is imported.")
+        return
+    body = "\n".join(f"• {item['topic']} — revise from {item['frequency']} PYQs" for item in topics)
+    await send_message(message, f"🔄 <b>Revision Priority</b>\n\n{body}")
+
+
+async def quiz(_, message):
+    parts = (message.text or "").split(maxsplit=1)
+    items = await quiz_items(parts[1] if len(parts) > 1 else "")
+    if not items:
+        await send_message(message, "🤖 No source-backed quiz questions are available yet. Import PYQs first.")
+        return
+    body = "\n\n".join(f"{index}. {item['question']}" for index, item in enumerate(items, 1))
+    await send_message(message, f"🤖 <b>Source-backed Quiz</b>\n\n{body}\n\nReply with your answers in order. Answers will be added after the structured PYQ importer is expanded.")
+
+
 async def word(_, message):
     await send_message(
         message,
@@ -155,4 +184,7 @@ def register_handlers(client):
     client.add_handler(MessageHandler(ask, command("ask") & owner))
     client.add_handler(MessageHandler(pyq, command("pyq") & owner))
     client.add_handler(MessageHandler(important, command("important") & owner))
+    client.add_handler(MessageHandler(complete, command("complete") & owner))
+    client.add_handler(MessageHandler(revision, command("revision") & owner))
+    client.add_handler(MessageHandler(quiz, command("quiz") & owner))
     LOGGER.info("TNPSC private study coach handlers registered")
