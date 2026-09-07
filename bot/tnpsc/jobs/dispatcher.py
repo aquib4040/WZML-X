@@ -18,6 +18,10 @@ async def _worker():
                 from ..syllabus import build_daily_plan
 
                 await build_daily_plan(job.get("payload", {}).get("user_id"))
+            elif job.get("job_type") == "IMPORT_DOCUMENT":
+                # Extraction and AI analysis are implemented in Phase 5.
+                await jobs.finish(job["_id"], "deferred", "Document extraction scheduled for Phase 5")
+                continue
             await jobs.finish(job["_id"])
         except Exception as error:
             attempts = job.get("attempts", 1)
