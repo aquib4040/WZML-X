@@ -12,6 +12,7 @@ from .syllabus import build_daily_plan, get_progress
 from .ai import get_provider
 from .ai.base import AIRequest
 from .retrieval import format_context, retrieve
+from .pyq import search_pyqs
 
 
 def _owner_id():
@@ -103,6 +104,16 @@ async def ask(_, message):
     await send_message(message, f"🧠 <b>TNPSC Tutor</b>\n\n{answer}\n\n<i>Answer generated from stored textbook sources.</i>")
 
 
+async def pyq(_, message):
+    parts = (message.text or "").split(maxsplit=1)
+    results = await search_pyqs(parts[1] if len(parts) > 1 else "")
+    if not results:
+        await send_message(message, "📝 No stored PYQs found yet. Upload a question paper to the configured source channel.")
+        return
+    body = "\n\n".join(f"{index}. {item['question']}" for index, item in enumerate(results, 1))
+    await send_message(message, f"📝 <b>Previous Questions</b>\n\n{body}")
+
+
 async def word(_, message):
     await send_message(
         message,
@@ -132,4 +143,5 @@ def register_handlers(client):
     client.add_handler(MessageHandler(progress, command("progress") & owner))
     client.add_handler(MessageHandler(enqueue_daily_plan, command("refreshplan") & owner))
     client.add_handler(MessageHandler(ask, command("ask") & owner))
+    client.add_handler(MessageHandler(pyq, command("pyq") & owner))
     LOGGER.info("TNPSC private study coach handlers registered")

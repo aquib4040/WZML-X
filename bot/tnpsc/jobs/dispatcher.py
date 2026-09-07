@@ -1,4 +1,5 @@
 import asyncio
+import re
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -45,6 +46,18 @@ async def _import_document(job):
     if not source or not source.get("local_path"):
         raise ValueError("source file is unavailable")
     pages = extract(source["local_path"])
+    if source.get("source_type") == "pyq":
+        from ..pyq import save_pyq
+
+        for page in pages:
+            for question in re.split(r"\n+|(?<=\?) ", page["text"]):
+                if "?" in question:
+                    await save_pyq(question, source_id=source_id)
+        await database.db.tnpsc_sources.update_one(
+            {"_id": source_id},
+            {"$set": {"processing_status": "pyq_imported", "page_count": len(pages), "updated_at": datetime.utcnow()}},
+        )
+        return
     records = database.db.tnpsc_knowledge
     for item in chunks(pages):
         knowledge_id = f"{source_id}:{item['content_hash']}"

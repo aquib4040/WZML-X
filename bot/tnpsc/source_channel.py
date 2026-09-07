@@ -20,6 +20,9 @@ def _channel_id():
 
 
 def _source_type(message):
+    label = f"{message.caption or ''} {message.text or ''}".lower()
+    if "pyq" in label or "previous year" in label or "question paper" in label:
+        return "pyq"
     if message.document:
         return "document"
     if message.photo:
