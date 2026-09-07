@@ -100,6 +100,9 @@ async def main():
     )
 
     await save_settings()
+    from .tnpsc.jobs.dispatcher import start_worker as start_tnpsc_worker
+
+    start_tnpsc_worker()
     if not Config.DISABLE_JD:
         bot_loop.create_task(jdownloader.boot())
     global _clean_task

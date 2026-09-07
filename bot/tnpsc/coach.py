@@ -7,6 +7,8 @@ from .. import LOGGER
 from ..core.config_manager import Config
 from ..helper.ext_utils.db_handler import database
 from ..helper.telegram_helper.message_utils import send_message
+from .jobs.repository import jobs
+from .syllabus import build_daily_plan, get_progress
 
 
 def _owner_id():
@@ -53,17 +55,25 @@ async def countdown(_, message):
 async def today(_, message):
     user_id = message.from_user.id
     await _save_progress(user_id, last_seen_date=date.today().isoformat())
+    tasks = await build_daily_plan(user_id)
     remaining = max(0, (_exam_date() - date.today()).days)
     await send_message(
         message,
         "📅 <b>Today’s TNPSC Coach Plan</b>\n\n"
-        "1. 📖 Study one textbook topic\n"
-        "2. 📝 Solve 20 previous-year questions\n"
-        "3. 🔄 Review every wrong answer\n"
-        "4. 🧠 Take a short revision quiz\n"
-        "5. 📚 Learn today’s English word: <b>Consistency</b> — <b>தொடர்ச்சியான முயற்சி</b>\n\n"
+        + "\n".join(f"{i}. {task['title']} ({task['minutes']} min)" for i, task in enumerate(tasks, 1))
+        + "\n5. 📚 Learn today’s English word: <b>Consistency</b> — <b>தொடர்ச்சியான முயற்சி</b>\n\n"
         f"⏳ {remaining} days remain. Mark each task complete before resting.",
     )
+
+
+async def progress(_, message):
+    data = await get_progress(message.from_user.id)
+    await send_message(message, f"📊 <b>Your Progress</b>\n\nCompleted minutes: <b>{data.get('completed_minutes', 0)}</b>\nLast activity: <b>{data.get('last_seen_date', 'Not started')}</b>")
+
+
+async def enqueue_daily_plan(_, message):
+    job_id = await jobs.enqueue("GENERATE_DAILY_TIMETABLE", {"user_id": message.from_user.id}, f"daily-plan:{message.from_user.id}:{date.today().isoformat()}")
+    await send_message(message, f"✅ Daily timetable job queued.\nJob: <code>{job_id or 'database unavailable'}</code>")
 
 
 async def word(_, message):
@@ -92,5 +102,6 @@ def register_handlers(client):
     client.add_handler(MessageHandler(today, command(["today", "timetable"]) & owner))
     client.add_handler(MessageHandler(word, command("word") & owner))
     client.add_handler(MessageHandler(motivation, command("motivation") & owner))
+    client.add_handler(MessageHandler(progress, command("progress") & owner))
+    client.add_handler(MessageHandler(enqueue_daily_plan, command("refreshplan") & owner))
     LOGGER.info("TNPSC private study coach handlers registered")
-

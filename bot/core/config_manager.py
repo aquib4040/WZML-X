@@ -25,6 +25,10 @@ class Config:
     TNPSC_AI_PROVIDER = "openrouter"
     TNPSC_AI_MODEL = "openrouter/free"
     OPENROUTER_API_KEY = ""
+    GEMINI_API_KEY = ""
+    TNPSC_AI_FALLBACK_PROVIDER = "gemini"
+    TNPSC_AI_CONCURRENCY = 3
+    TNPSC_EXTRACTION_WORKERS = 4
     AS_DOCUMENT = False
     AUTHORIZED_CHATS = ""
     AUTO_THUMBNAIL = False
