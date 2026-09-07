@@ -15,6 +15,7 @@ from .retrieval import format_context, retrieve
 from .pyq import search_pyqs
 from .importance import top_topics
 from .student import complete_minutes, quiz_items, revision_items
+from .youtube import enqueue_summary
 
 
 def _owner_id():
@@ -153,6 +154,19 @@ async def quiz(_, message):
     await send_message(message, f"🤖 <b>Source-backed Quiz</b>\n\n{body}\n\nReply with your answers in order. Answers will be added after the structured PYQ importer is expanded.")
 
 
+async def ytsummary(_, message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await send_message(message, "Usage: <code>/ytsummary https://youtube.com/watch?v=...</code>")
+        return
+    try:
+        job_id = await enqueue_summary(message.from_user.id, parts[1].strip())
+    except ValueError as error:
+        await send_message(message, f"❌ {error}")
+        return
+    await send_message(message, f"🎥 YouTube summary queued.\nJob: <code>{job_id or 'database unavailable'}</code>")
+
+
 async def word(_, message):
     await send_message(
         message,
@@ -187,4 +201,5 @@ def register_handlers(client):
     client.add_handler(MessageHandler(complete, command("complete") & owner))
     client.add_handler(MessageHandler(revision, command("revision") & owner))
     client.add_handler(MessageHandler(quiz, command("quiz") & owner))
+    client.add_handler(MessageHandler(ytsummary, command("ytsummary") & owner))
     LOGGER.info("TNPSC private study coach handlers registered")

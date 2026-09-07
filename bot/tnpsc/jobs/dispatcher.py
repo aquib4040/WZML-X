@@ -25,6 +25,8 @@ async def _worker():
                 from ..importance import rebuild_importance
 
                 await rebuild_importance()
+            elif job.get("job_type") == "SUMMARIZE_YOUTUBE":
+                await _summarize_youtube(job)
             await jobs.finish(job["_id"])
         except Exception as error:
             attempts = job.get("attempts", 1)
@@ -71,6 +73,31 @@ async def _import_document(job):
             upsert=True,
         )
     await database.db.tnpsc_sources.update_one({"_id": source_id}, {"$set": {"processing_status": "extracted", "page_count": len(pages), "updated_at": datetime.utcnow()}})
+
+
+async def _summarize_youtube(job):
+    from asyncio import to_thread
+    from yt_dlp import YoutubeDL
+    from ..ai import get_provider
+    from ..ai.base import AIRequest
+
+    url = job.get("payload", {}).get("url")
+    options = {"quiet": True, "skip_download": True, "noplaylist": True}
+    cookies = getattr(__import__("bot.core.config_manager", fromlist=["Config"]).Config, "YOUTUBE_COOKIES_FILE", "")
+    if cookies:
+        options["cookiefile"] = cookies
+
+    def metadata():
+        with YoutubeDL(options) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    info = await to_thread(metadata)
+    title = info.get("title", "YouTube study video")
+    description = info.get("description", "")[:12000]
+    prompt = f"Title: {title}\nDescription/transcript if available:\n{description}\n\nCreate a concise Tamil TNPSC study summary, important points, and five source-limited MCQs. If evidence is insufficient, say so."
+    result = await get_provider().generate(AIRequest(system="You are a careful Tamil TNPSC tutor. Never invent facts.", prompt=prompt, max_tokens=1000))
+    if database.db is not None:
+        await database.db.tnpsc_sources.update_one({"source_reference.url": url}, {"$set": {"title": title, "summary": result, "processing_status": "complete", "metadata": {"video_id": info.get("id"), "duration": info.get("duration")}, "updated_at": datetime.utcnow()}}, upsert=True)
 
 
 def start_worker():
