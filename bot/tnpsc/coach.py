@@ -67,7 +67,7 @@ async def today(_, message):
     await send_message(
         message,
         "📅 <b>Today’s TNPSC Coach Plan</b>\n\n"
-        + "\n".join(f"{i}. {task['title']} ({task['minutes']} min)" for i, task in enumerate(tasks, 1))
+        + "\n".join(f"{i}. {task['time']} — {task['title']} ({task['minutes']} min)" for i, task in enumerate(tasks, 1))
         + "\n5. 📚 Learn today’s English word: <b>Consistency</b> — <b>தொடர்ச்சியான முயற்சி</b>\n\n"
         f"⏳ {remaining} days remain. Mark each task complete before resting.",
     )

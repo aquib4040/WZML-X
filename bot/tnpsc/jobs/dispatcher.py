@@ -80,10 +80,14 @@ async def _summarize_youtube(job):
     from yt_dlp import YoutubeDL
     from ..ai import get_provider
     from ..ai.base import AIRequest
+    from ... import user_data
+    from ...core.config_manager import Config
 
     url = job.get("payload", {}).get("url")
     options = {"quiet": True, "skip_download": True, "noplaylist": True}
-    cookies = getattr(__import__("bot.core.config_manager", fromlist=["Config"]).Config, "YOUTUBE_COOKIES_FILE", "")
+    user_id = job.get("payload", {}).get("user_id")
+    user_settings = user_data.get(user_id, {})
+    cookies = user_settings.get("USER_COOKIE_FILE") or getattr(Config, "YOUTUBE_COOKIES_FILE", "")
     if cookies:
         options["cookiefile"] = cookies
 
@@ -97,7 +101,7 @@ async def _summarize_youtube(job):
     prompt = f"Title: {title}\nDescription/transcript if available:\n{description}\n\nCreate a concise Tamil TNPSC study summary, important points, and five source-limited MCQs. If evidence is insufficient, say so."
     result = await get_provider().generate(AIRequest(system="You are a careful Tamil TNPSC tutor. Never invent facts.", prompt=prompt, max_tokens=1000))
     if database.db is not None:
-        await database.db.tnpsc_sources.update_one({"source_reference.url": url}, {"$set": {"title": title, "summary": result, "processing_status": "complete", "metadata": {"video_id": info.get("id"), "duration": info.get("duration")}, "updated_at": datetime.utcnow()}}, upsert=True)
+        await database.db.tnpsc_sources.update_one({"source_reference.url": url}, {"$set": {"title": title, "summary": result, "processing_status": "complete", "metadata": {"video_id": info.get("id"), "duration": info.get("duration"), "token_pickle_available": bool(user_settings.get("TOKEN_PICKLE")), "gdrive_id": user_settings.get("GDRIVE_ID")}, "updated_at": datetime.utcnow()}}, upsert=True)
 
 
 def start_worker():
