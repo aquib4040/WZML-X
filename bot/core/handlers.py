@@ -15,6 +15,9 @@ from .tg_client import TgClient
 
 
 def add_handlers():
+    from ..tnpsc.coach import register_handlers as register_tnpsc_handlers
+
+    register_tnpsc_handlers(TgClient.bot)
     TgClient.bot.add_handler(
         MessageHandler(
             authorize,

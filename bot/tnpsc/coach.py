@@ -1,0 +1,96 @@
+from datetime import date, datetime
+
+from pyrogram.filters import command, user
+from pyrogram.handlers import MessageHandler
+
+from .. import LOGGER
+from ..core.config_manager import Config
+from ..helper.ext_utils.db_handler import database
+from ..helper.telegram_helper.message_utils import send_message
+
+
+def _owner_id():
+    try:
+        return int(getattr(Config, "TNPSC_OWNER_USER_ID", 0) or Config.OWNER_ID or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _exam_date():
+    try:
+        return date.fromisoformat(getattr(Config, "TNPSC_EXAM_DATE", "2026-12-20"))
+    except ValueError:
+        return date(2026, 12, 20)
+
+
+def _owner_filter():
+    owner = _owner_id()
+    return user(owner) if owner else user(0)
+
+
+async def _save_progress(user_id, **values):
+    if database.db is None:
+        return
+    collection = database.db.tnpsc_progress
+    await collection.update_one(
+        {"_id": f"{database._partition()}:{user_id}"},
+        {"$set": {**values, "updated_at": datetime.utcnow()}},
+        upsert=True,
+    )
+
+
+async def countdown(_, message):
+    remaining = max(0, (_exam_date() - date.today()).days)
+    await send_message(
+        message,
+        f"⏳ <b>TNPSC Group 4 Countdown</b>\n\n"
+        f"Exam date: <b>{_exam_date().isoformat()}</b>\n"
+        f"Days remaining: <b>{remaining}</b>\n\n"
+        "Stay consistent. Today’s completed study is more important than tomorrow’s plan.",
+    )
+
+
+async def today(_, message):
+    user_id = message.from_user.id
+    await _save_progress(user_id, last_seen_date=date.today().isoformat())
+    remaining = max(0, (_exam_date() - date.today()).days)
+    await send_message(
+        message,
+        "📅 <b>Today’s TNPSC Coach Plan</b>\n\n"
+        "1. 📖 Study one textbook topic\n"
+        "2. 📝 Solve 20 previous-year questions\n"
+        "3. 🔄 Review every wrong answer\n"
+        "4. 🧠 Take a short revision quiz\n"
+        "5. 📚 Learn today’s English word: <b>Consistency</b> — <b>தொடர்ச்சியான முயற்சி</b>\n\n"
+        f"⏳ {remaining} days remain. Mark each task complete before resting.",
+    )
+
+
+async def word(_, message):
+    await send_message(
+        message,
+        "📖 <b>Today’s English Word</b>\n\n"
+        "<b>Consistency</b>\n"
+        "தமிழ்: <b>தொடர்ச்சியான முயற்சி</b>\n"
+        "Meaning: தொடர்ந்து செய்வது வெற்றிக்கு வழிவகுக்கும்.\n"
+        "Example: Consistency is more powerful than occasional hard work.",
+    )
+
+
+async def motivation(_, message):
+    await send_message(
+        message,
+        "🔥 <b>Today’s Motivation</b>\n\n"
+        "ஒரே நாளில் பெரிய மாற்றம் வராது. ஆனால் ஒவ்வொரு நாளும் செய்யும் சிறிய முயற்சிகள், தேர்வு நாளில் பெரிய வெற்றியாக மாறும்.\n\n"
+        "இன்று திட்டத்தை முடி. நாளைய நம்பிக்கையை இன்று உருவாக்கு.",
+    )
+
+
+def register_handlers(client):
+    owner = _owner_filter()
+    client.add_handler(MessageHandler(countdown, command("countdown") & owner))
+    client.add_handler(MessageHandler(today, command(["today", "timetable"]) & owner))
+    client.add_handler(MessageHandler(word, command("word") & owner))
+    client.add_handler(MessageHandler(motivation, command("motivation") & owner))
+    LOGGER.info("TNPSC private study coach handlers registered")
+

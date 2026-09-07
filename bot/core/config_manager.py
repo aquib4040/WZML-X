@@ -15,6 +15,16 @@ def bin_name(index):
 
 
 class Config:
+    TNPSC_OWNER_USER_ID = 0
+    TNPSC_PRIVATE_MODE = True
+    TNPSC_EXAM_DATE = "2026-12-20"
+    TNPSC_DAILY_PLAN_ENABLED = True
+    TNPSC_DAILY_WORD_ENABLED = True
+    TNPSC_DAILY_MOTIVATION_ENABLED = True
+    TNPSC_DAILY_NOTIFICATION_TIME = "08:00"
+    TNPSC_AI_PROVIDER = "openrouter"
+    TNPSC_AI_MODEL = "openrouter/free"
+    OPENROUTER_API_KEY = ""
     AS_DOCUMENT = False
     AUTHORIZED_CHATS = ""
     AUTO_THUMBNAIL = False

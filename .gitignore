@@ -17,6 +17,8 @@ list_drives.txt
 shortener.txt
 categories.txt
 cookies.txt
+youtube-cookies*
+*.cookies
 downloads/*
 .github/instructions/*
 .github/skills/*
