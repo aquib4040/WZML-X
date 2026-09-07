@@ -21,6 +21,10 @@ async def _worker():
                 await build_daily_plan(job.get("payload", {}).get("user_id"))
             elif job.get("job_type") == "IMPORT_DOCUMENT":
                 await _import_document(job)
+            elif job.get("job_type") == "REBUILD_IMPORTANCE":
+                from ..importance import rebuild_importance
+
+                await rebuild_importance()
             await jobs.finish(job["_id"])
         except Exception as error:
             attempts = job.get("attempts", 1)

@@ -13,6 +13,7 @@ from .ai import get_provider
 from .ai.base import AIRequest
 from .retrieval import format_context, retrieve
 from .pyq import search_pyqs
+from .importance import top_topics
 
 
 def _owner_id():
@@ -114,6 +115,15 @@ async def pyq(_, message):
     await send_message(message, f"📝 <b>Previous Questions</b>\n\n{body}")
 
 
+async def important(_, message):
+    topics = await top_topics()
+    if not topics:
+        await send_message(message, "🎯 Importance data is not available yet. Upload PYQs first.")
+        return
+    body = "\n".join(f"{index}. <b>{item['topic']}</b> — {item['frequency']} PYQs, {item['distinct_years']} years, score {item['score']}" for index, item in enumerate(topics, 1))
+    await send_message(message, f"🎯 <b>Important PYQ Topics</b>\n\n{body}\n\n<i>Based only on stored PYQ data.</i>")
+
+
 async def word(_, message):
     await send_message(
         message,
@@ -144,4 +154,5 @@ def register_handlers(client):
     client.add_handler(MessageHandler(enqueue_daily_plan, command("refreshplan") & owner))
     client.add_handler(MessageHandler(ask, command("ask") & owner))
     client.add_handler(MessageHandler(pyq, command("pyq") & owner))
+    client.add_handler(MessageHandler(important, command("important") & owner))
     LOGGER.info("TNPSC private study coach handlers registered")
