@@ -16,6 +16,7 @@ from .pyq import search_pyqs
 from .importance import top_topics
 from .student import complete_minutes, quiz_items, revision_items
 from .youtube import enqueue_summary
+from .jobs.repository import jobs
 
 
 def _owner_id():
@@ -167,6 +168,11 @@ async def ytsummary(_, message):
     await send_message(message, f"🎥 YouTube summary queued.\nJob: <code>{job_id or 'database unavailable'}</code>")
 
 
+async def scout(_, message):
+    job_id = await jobs.enqueue("SCOUT_OFFICIAL_SOURCES", {"user_id": message.from_user.id}, "official-scout:manual")
+    await send_message(message, f"🔎 Official TNPSC source scan queued.\nJob: <code>{job_id or 'database unavailable'}</code>")
+
+
 async def word(_, message):
     await send_message(
         message,
@@ -202,4 +208,5 @@ def register_handlers(client):
     client.add_handler(MessageHandler(revision, command("revision") & owner))
     client.add_handler(MessageHandler(quiz, command("quiz") & owner))
     client.add_handler(MessageHandler(ytsummary, command("ytsummary") & owner))
+    client.add_handler(MessageHandler(scout, command("scout") & owner))
     LOGGER.info("TNPSC private study coach handlers registered")

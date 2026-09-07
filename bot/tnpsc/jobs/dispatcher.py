@@ -27,6 +27,10 @@ async def _worker():
                 await rebuild_importance()
             elif job.get("job_type") == "SUMMARIZE_YOUTUBE":
                 await _summarize_youtube(job)
+            elif job.get("job_type") == "SCOUT_OFFICIAL_SOURCES":
+                from ..scout import scout_official_sources
+
+                await scout_official_sources()
             await jobs.finish(job["_id"])
         except Exception as error:
             attempts = job.get("attempts", 1)
