@@ -25,6 +25,7 @@ pillow
 psutil
 pycountry
 pymongo
+pypdf
 pysubs2
 pyrotgfork
 pytgcrypto

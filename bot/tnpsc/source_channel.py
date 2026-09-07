@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 from datetime import datetime
 
 from pyrogram.filters import channel
@@ -63,6 +64,10 @@ async def _ingest(client, message):
         "created_at": now,
         "updated_at": now,
     }
+    if message.document or message.photo:
+        target_dir = Path(DOWNLOAD_DIR) / "tnpsc_sources"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        source["local_path"] = await message.download(file_name=str(target_dir / source_key.replace(":", "_")))
     duplicate = await sources.find_one({"content_hash": source["content_hash"]})
     if duplicate:
         source["processing_status"] = "duplicate"
@@ -88,4 +93,3 @@ def register_source_handler(client):
         return
     client.add_handler(MessageHandler(source_message, channel(source_id)))
     LOGGER.info("TNPSC source-channel handler registered for configured channel")
-

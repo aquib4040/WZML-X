@@ -19,9 +19,7 @@ async def _worker():
 
                 await build_daily_plan(job.get("payload", {}).get("user_id"))
             elif job.get("job_type") == "IMPORT_DOCUMENT":
-                # Extraction and AI analysis are implemented in Phase 5.
-                await jobs.finish(job["_id"], "deferred", "Document extraction scheduled for Phase 5")
-                continue
+                await _import_document(job)
             await jobs.finish(job["_id"])
         except Exception as error:
             attempts = job.get("attempts", 1)
@@ -34,6 +32,28 @@ async def _worker():
             else:
                 await jobs.finish(job["_id"], "failed", str(error))
             LOGGER.exception("TNPSC job failed: %s", job.get("_id"))
+
+
+async def _import_document(job):
+    from datetime import datetime
+
+    from ..extraction.document import chunks, extract
+    from ...helper.ext_utils.db_handler import database
+
+    source_id = job.get("payload", {}).get("source_id")
+    source = await database.db.tnpsc_sources.find_one({"_id": source_id})
+    if not source or not source.get("local_path"):
+        raise ValueError("source file is unavailable")
+    pages = extract(source["local_path"])
+    records = database.db.tnpsc_knowledge
+    for item in chunks(pages):
+        knowledge_id = f"{source_id}:{item['content_hash']}"
+        await records.update_one(
+            {"_id": knowledge_id},
+            {"$setOnInsert": {"_id": knowledge_id, "source_id": source_id, "language": "ta", "kind": "source_chunk", "content": {"statement": item["text"]}, "source_reference": {"page": item["page"], "telegram_message_id": source["source_reference"].get("telegram_message_id")}, "verification": {"status": "source-backed", "ai_generated": False}, "content_hash": item["content_hash"], "created_at": datetime.utcnow()}},
+            upsert=True,
+        )
+    await database.db.tnpsc_sources.update_one({"_id": source_id}, {"$set": {"processing_status": "extracted", "page_count": len(pages), "updated_at": datetime.utcnow()}})
 
 
 def start_worker():
